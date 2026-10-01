@@ -125,17 +125,19 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Create and push manifest
+        env:
+          # Passed through the environment on purpose. The metadata tag list is
+          # newline-separated; interpolating `${{ }}` straight into the script
+          # turns those newlines into command separators, so only the first tag
+          # reached `set --` and the rest were executed as commands. Inside an
+          # env var the newlines are ordinary IFS whitespace and split correctly.
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
-          # The tag list is newline-separated; turn it into `--tag X --tag Y` flags.
-          # shellcheck disable=SC2046
-          set -- ${{ steps.meta.outputs.tags }}
-          flags=""
-          for tag in "$@"; do
-            flags="${flags} --tag ${tag}"
-          done
           base="${REGISTRY}/${IMAGE_NAME}:build-${GITHUB_SHA}-"
           # shellcheck disable=SC2086
-          docker buildx imagetools create ${flags} "${base}amd64" "${base}arm64"
+          docker buildx imagetools create \
+            $(for tag in $TAGS; do printf -- '--tag %s ' "$tag"; done) \
+            "${base}amd64" "${base}arm64"
 
       - name: Inspect the published manifest
         run: |
