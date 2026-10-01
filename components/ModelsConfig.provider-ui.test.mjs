@@ -249,6 +249,47 @@ test("an empty discovery result is a valid answer, not a failure", async (t) => 
   assert.equal(screen.queryByRole("button", { name: "Add selected" }), null);
 });
 
+test("an empty discovery that carries a reason names the server that was asked", async (t) => {
+  const user = userEvent.setup();
+  await openProvider(t, {
+    provider: { ...BASE_PROVIDER, discovery: { type: "openai-models-list" } },
+    discover: () => jsonResponse({
+      ok: true,
+      models: [],
+      reason: "discovery_returned_nothing",
+      baseUrl: "http://127.0.0.1:8000/v1",
+    }),
+  });
+
+  await user.click(screen.getByRole("button", { name: "Discover models" }));
+
+  const body = document.body.textContent;
+  assert.doesNotMatch(
+    body,
+    /did not report any models/,
+    "the generic empty-list line is the wrong explanation when the server was asked and answered",
+  );
+  assert.match(body, /found no models/);
+  assert.match(body, /127\.0\.0\.1:8000\/v1/, "the url omp actually asked is named");
+});
+
+test("an empty discovery with no baseUrl to name still explains itself", async (t) => {
+  const user = userEvent.setup();
+  await openProvider(t, {
+    provider: { ...BASE_PROVIDER, discovery: { type: "ollama" } },
+    // A provider can legitimately have no baseUrl (omp's own default endpoint),
+    // so the sentence must not degrade into an empty code span.
+    discover: () => jsonResponse({ ok: true, models: [], reason: "discovery_returned_nothing" }),
+  });
+
+  await user.click(screen.getByRole("button", { name: "Discover models" }));
+
+  const body = document.body.textContent;
+  assert.match(body, /found no models/);
+  assert.match(body, /the configured server/);
+  assert.doesNotMatch(body, /``/, "an unknown url must not leave an empty interpolation behind");
+});
+
 test("a discovered model is not printed twice when its name is its id", async (t) => {
   const user = userEvent.setup();
   await openProvider(t, {

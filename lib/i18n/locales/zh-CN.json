@@ -1454,6 +1454,8 @@
   "modelsConfig.modelsFound.one": "找到 {count} 个模型",
   "modelsConfig.modelsFound.other": "找到 {count} 个模型",
   "modelsConfig.discoverNoModels": "服务器未报告该提供商的任何模型。",
+  "modelsConfig.discoveryNothingFound": "omp 运行了配置的发现流程，但服务器没有返回任何模型。请确认 `{url}` 已启动且可以访问，并确认 `openai-models-list` 指向标准的 `/v1/models` 端点——ollama 等原生服务器需要各自的发现类型。",
+  "modelsConfig.discoveryBaseUrlUnknown": "已配置的服务器",
   "modelsConfig.addSelectedModels": "添加所选模型",
   "modelsConfig.requestHeaders": "请求头",
   "modelsConfig.requestHeadersHint": "随发往该提供商的每个请求一起发送。值支持环境变量和 `!command` 解析。",
