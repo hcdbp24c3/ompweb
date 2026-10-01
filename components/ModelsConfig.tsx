@@ -806,6 +806,12 @@ function ThinkingEditor({
     // disabled (excluded from efforts); string → enabled with a custom value.
     const included = new Set<string>(efforts ?? THINKING_LEVELS);
     const map: Record<string, string> = { ...effortMap };
+    // omp clamps a `defaultLevel` that is not in `efforts` to the nearest one it
+    // knows, silently: the file would keep claiming `high` while the model runs
+    // as something else. A default that contradicts its own ladder goes with the
+    // level, and the user is told rather than left with a lie.
+    const clearsDefault = entry === null && value?.defaultLevel === level;
+    if (clearsDefault) toast.info(t("modelsConfig.defaultLevelCleared", { level }));
     if (entry === null) {
       included.delete(level);
       delete map[level];
@@ -822,12 +828,14 @@ function ThinkingEditor({
       onChange(undefined);
       return;
     }
-    onChange({
-      ...(value ?? {}),
-      mode: value?.mode ?? "effort",
-      efforts: ordered,
-      effortMap: Object.keys(map).length ? map : undefined,
-    });
+    onChange(
+      patchThinking(value, {
+        mode: value?.mode ?? "effort",
+        efforts: ordered,
+        effortMap: Object.keys(map).length ? map : undefined,
+        ...(clearsDefault ? { defaultLevel: undefined } : {}),
+      }),
+    );
   };
 
   return (

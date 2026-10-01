@@ -17,6 +17,9 @@ const jiti = createJiti(import.meta.url, {
   tsconfigPaths: true,
 });
 const { ModelsConfig } = await jiti.import("./ModelsConfig.tsx");
+// Same module instance ModelsConfig.tsx resolves through `@/…`, so patching the
+// exported object's method is enough to observe what the editor reports.
+const { toast } = await jiti.import("@/components/ui/toast");
 
 // A successful save arms a 2s "Saved" lockout (`setTimeout` in handleSave). Left
 // pending it fires after setup-dom.mjs's file-level teardown deleted `window`
@@ -220,6 +223,99 @@ test("with no explicit ladder there is no level to pin as the default", async (t
     [...screen.getByLabelText("Default level").options].map((option) => option.value),
     [""],
     "omp derives the ladder itself here, so no effort is enabled for a default to point at",
+  );
+});
+
+// omp's `clampThinkingLevelForModel` silently snaps a `defaultLevel` that is no
+// longer in `efforts` down to the nearest one it knows — `defaultLevel: max` over
+// `efforts: [low, high]` runs as `high` with no warning. A value that quietly
+// disagrees with itself is worse than no value, so disabling the level the
+// default names drops the default with it and says so.
+
+/** Captures what the editor reports through the shared toast module. */
+function captureToasts(t) {
+  const calls = [];
+  t.mock.method(toast, "info", (title, description) => { calls.push({ title: String(title), description }); });
+  return calls;
+}
+
+test("disabling the level the default names drops the default with it", async (t) => {
+  const user = userEvent.setup();
+  const toasts = captureToasts(t);
+  const { open, save } = await editor(t, {
+    model: {
+      ...BASE_MODEL,
+      thinking: { mode: "effort", efforts: ["low", "high"], defaultLevel: "high", effortMap: { low: "LOW" } },
+    },
+  });
+  await open();
+
+  await user.click(levelButton("high", "Disabled"));
+  const thinking = (await save()).thinking;
+
+  assert.deepEqual(thinking.efforts, ["low"], "the disabled level leaves the ladder");
+  assert.equal(
+    thinking.defaultLevel,
+    undefined,
+    "a defaultLevel outside efforts is silently clamped by omp, so it must not survive the edit",
+  );
+  assert.equal(thinking.mode, "effort", "clearing the default must not disturb the mode");
+  assert.deepEqual(thinking.effortMap, { low: "LOW" }, "clearing the default must not disturb the wire overrides");
+
+  assert.equal(toasts.length, 1, `the user has to be told, saw ${JSON.stringify(toasts)}`);
+  assert.match(toasts[0].title + (toasts[0].description ?? ""), /high/);
+});
+
+test("disabling a level the default does not name leaves the default alone", async (t) => {
+  const user = userEvent.setup();
+  const toasts = captureToasts(t);
+  const { open, save } = await editor(t, {
+    model: { ...BASE_MODEL, thinking: { mode: "effort", efforts: ["low", "high"], defaultLevel: "high" } },
+  });
+  await open();
+
+  await user.click(levelButton("low", "Disabled"));
+  const thinking = (await save()).thinking;
+
+  assert.deepEqual(thinking.efforts, ["high"]);
+  assert.equal(
+    thinking.defaultLevel,
+    "high",
+    "the default still names an enabled level, so there is nothing to clear",
+  );
+  assert.deepEqual(toasts, [], "a routine edit must not cry wolf about a default it did not touch");
+});
+
+test("with no default level, disabling the last level leaves no thinking block behind", async (t) => {
+  const user = userEvent.setup();
+  captureToasts(t);
+  const { open, save } = await editor(t, {
+    model: { ...BASE_MODEL, thinking: { mode: "effort", efforts: ["high"] } },
+  });
+  await open();
+
+  await user.click(levelButton("high", "Disabled"));
+  assert.equal(
+    (await save()).thinking,
+    undefined,
+    "an empty ladder is not a thinking config; the whole block goes",
+  );
+});
+
+test("disabling the only enabled level, which was the default, still reports the cleared default", async (t) => {
+  const user = userEvent.setup();
+  const toasts = captureToasts(t);
+  const { open, save } = await editor(t, {
+    model: { ...BASE_MODEL, thinking: { mode: "effort", efforts: ["high"], defaultLevel: "high" } },
+  });
+  await open();
+
+  await user.click(levelButton("high", "Disabled"));
+  assert.equal((await save()).thinking, undefined, "an empty ladder is not a thinking config");
+  assert.equal(
+    toasts.length,
+    1,
+    "the block is wiped wholesale here, which drops the default just as silently as the surgical path",
   );
 });
 

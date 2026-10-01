@@ -1520,6 +1520,7 @@
   "modelsConfig.thinkingModeHint": "How the model is asked to think. Leave it on the model default and omp chooses the mode.",
   "modelsConfig.thinkingDefaultLevel": "Default level",
   "modelsConfig.thinkingDefaultLevelHint": "The effort the conversation starts from. Only the levels enabled below can be chosen.",
+  "modelsConfig.defaultLevelCleared": "`{level}` was the default level and is now disabled, so the default was cleared too — omp derives it from the levels left on.",
   "agentsConfig.descPlaceholder": "UI/UX specialist for design implementation",
   "agentsConfig.systemPromptPlaceholder": "Agent instructions…",
   "usageConfig.title": "Usage",
