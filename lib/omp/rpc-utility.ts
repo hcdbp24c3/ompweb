@@ -18,6 +18,68 @@ import { RpcProcess } from "./rpc-process";
 // Measured against a real install (omp/17.1.3): ready-frame latency is the same
 // either way (~3.6s with vs ~4.0s without over 4 runs each).
 const UTILITY_EXTRA_ARGS = ["--no-session", "--no-skills", "--no-lsp"];
+
+// omp exits 1 when it resolves zero models, and that check (coding-agent's
+// main.ts:2425) runs BEFORE the `mode === "rpc"` branch, so the process dies
+// before printing its `ready` frame and no command is ever answered — a brand
+// new install could not even list providers to add its first model. `--model`
+// exists purely to satisfy that guard: `get_available_models` is unaffected by
+// it and /api/models already gates defaultModel behind `available.some(...)`.
+//
+// Only this `--no-session` utility process is forced. Real sessions must use
+// lib/rpc-manager.ts and keep the model the user picked.
+//
+// Ordered by measurement, not guesswork: the first entry resolves on the
+// installed catalog; the rest are fallbacks for a future catalog that drops it.
+// Ids that do NOT exist in the catalog are deliberately left out — one of them
+// (`openai-codex/gpt-5-codex`) was verified missing.
+export const BOOT_MODEL_CANDIDATES = ["anthropic/claude-sonnet-4-5", "openai/gpt-5", "openai/gpt-4o"];
+
+// omp's own wording when it refuses to boot without a model (stderr tail is
+// folded into the exit error by RpcProcess), plus the message it prints when an
+// explicit --model selector cannot be resolved. Anything else (missing binary,
+// timeout, protocol error) must NOT be masked by the boot fallback.
+const NO_MODEL_EXIT_RE = /No models available|Model ".*" not found/;
+
+/** True only for omp's "I have no model to start with" refusal. */
+export function isNoModelBootFailure(error: unknown): boolean {
+  return NO_MODEL_EXIT_RE.test(error instanceof Error ? error.message : String(error));
+}
+
+/** Base utility args, plus `--model <selector>` only when one is supplied, so a
+ *  user who already has a working model boots exactly as before. */
+export function utilityExtraArgs(modelSelector?: string): string[] {
+  return modelSelector
+    ? [...UTILITY_EXTRA_ARGS, "--model", modelSelector]
+    : [...UTILITY_EXTRA_ARGS];
+}
+
+/** Boot attempt order: no selector first (the current happy path), then the
+ *  candidates in order, stopping at the first success. Only omp's no-model
+ *  refusal advances the loop — every other failure is rethrown untouched, and
+ *  when all candidates are rejected the last omp error is surfaced verbatim so
+ *  logs stay useful. */
+export async function withBootModelFallback<T>(
+  boot: (modelSelector: string | undefined) => Promise<T>,
+): Promise<T> {
+  let lastError: unknown;
+  try {
+    return await boot(undefined);
+  } catch (error) {
+    if (!isNoModelBootFailure(error)) throw error;
+    lastError = error;
+  }
+  for (const selector of BOOT_MODEL_CANDIDATES) {
+    try {
+      return await boot(selector);
+    } catch (error) {
+      if (!isNoModelBootFailure(error)) throw error;
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
 const READY_TIMEOUT_MS = 60_000;
 // Longer than the 60s models-cache TTL on purpose: with idle-kill == TTL every
 // pause past a minute paid a cold multi-second respawn on top of the stale
@@ -107,10 +169,10 @@ function scheduleIdleKill(state: UtilityRpcState): void {
   state.idleTimer.unref?.();
 }
 
-async function startProcess(state: UtilityRpcState): Promise<RpcProcess> {
+async function startProcess(state: UtilityRpcState, modelSelector?: string): Promise<RpcProcess> {
   const proc = new RpcProcess({
     cwd: homedir(),
-    extraArgs: UTILITY_EXTRA_ARGS,
+    extraArgs: utilityExtraArgs(modelSelector),
     onExit: () => {
       if (state.proc === proc) state.proc = null;
     },
@@ -139,7 +201,7 @@ export function runUtilityCommand<T = unknown>(
     }
     try {
       if (!state.proc || !state.proc.isAlive) {
-        state.proc = await startProcess(state);
+        state.proc = await withBootModelFallback((selector) => startProcess(state, selector));
       }
       return await state.proc.sendCommand<T>(command, timeoutMs);
     } finally {
