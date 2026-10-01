@@ -244,6 +244,49 @@ export const LEVEL_COLORS: Record<ThinkingLevel, string> = {
   xhigh:   "var(--status-warning)",
   max:     "var(--status-error)",
 };
+
+// ── Thinking ladder ──────────────────────────────────────────────────────────
+// THINKING_LEVELS is the six levels omp's own registry happens to use, not the
+// schema: models.yml is hand-written and omp's catalog declares levels outside
+// it. Rebuilding `efforts` from this list therefore deleted every other effort
+// the next time the user touched an unrelated field, so the editor works on a
+// union instead — known levels in canonical order, then whatever the file has.
+
+/** omp's ModelThinkingSchema mode enum (models-config-schema-bundle.ts). */
+export const THINKING_MODES = [
+  "effort",
+  "budget",
+  "google-level",
+  "anthropic-adaptive",
+  "anthropic-budget-effort",
+] as const;
+export type ThinkingMode = typeof THINKING_MODES[number];
+
+export const isThinkingLevel = (value: string): value is ThinkingLevel =>
+  (THINKING_LEVELS as readonly string[]).includes(value);
+
+/** Efforts the file already declares that THINKING_LEVELS has never heard of. */
+export const unknownThinkingEfforts = (efforts: string[] | undefined): string[] =>
+  (efforts ?? []).filter((effort) => !isThinkingLevel(effort));
+
+/** Every row the editor offers: the six known levels (so a disabled one can be
+ *  re-enabled) followed by whatever the file declares. */
+export const thinkingRows = (efforts: string[] | undefined): string[] =>
+  [...THINKING_LEVELS, ...unknownThinkingEfforts(efforts)];
+
+/** What to persist for `efforts`. Known levels in canonical order, unknown ones
+ *  after them in the order the file listed them. */
+export const orderedThinkingEfforts = (included: Iterable<string>): string[] => {
+  const set = new Set(included);
+  return [
+    ...THINKING_LEVELS.filter((level) => set.has(level)),
+    ...[...set].filter((effort) => !isThinkingLevel(effort)),
+  ];
+};
+
+export const thinkingLevelColor = (level: string): string =>
+  isThinkingLevel(level) ? LEVEL_COLORS[level] : "var(--text-dim)";
+
 export const COST_LABEL_KEYS = {
   input: "modelsConfig.costInput",
   output: "modelsConfig.costOutput",
