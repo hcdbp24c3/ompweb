@@ -41,6 +41,7 @@ import {
   thinkingLevelColor,
   thinkingRows,
   type DiscoveredModel,
+  type DiscoverEmptyReason,
   type DiscoveryType,
   type EndpointPreset,
   type ModelEntry,
@@ -86,7 +87,15 @@ type DiscoverState =
   | { phase: "idle" }
   | { phase: "running" }
   | { phase: "error"; message: string }
-  | { phase: "found"; models: DiscoveredModel[]; selected: Set<string> };
+  | {
+      phase: "found";
+      models: DiscoveredModel[];
+      selected: Set<string>;
+      /** Only set on an empty list, and only when the route could tell *why*. */
+      emptyReason?: DiscoverEmptyReason;
+      /** The endpoint that was asked, so an empty answer can point at it. */
+      baseUrl?: string;
+    };
 
 /** Provider-level model discovery (omp's `discovery` block) plus the Discover
  *  button that resolves the list through `/api/models-config/discover`.
@@ -173,13 +182,29 @@ function ProviderDiscoveryEditor({ name, provider, onChange, onAddModels }: {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ providerName: name, provider }),
       });
-      const d = await res.json() as { ok?: boolean; models?: DiscoveredModel[]; error?: string; code?: string };
+      const d = await res.json() as {
+        ok?: boolean;
+        models?: DiscoveredModel[];
+        error?: string;
+        code?: string;
+        reason?: DiscoverEmptyReason;
+        baseUrl?: string;
+      };
       if (!res.ok || !d.ok) {
         setDiscover({ phase: "error", message: d.error || d.code ? formatApiError(d) : `HTTP ${res.status}` });
         return;
       }
       const models = Array.isArray(d.models) ? d.models : [];
-      setDiscover({ phase: "found", models, selected: new Set(models.map((model) => model.id)) });
+      setDiscover({
+        phase: "found",
+        models,
+        selected: new Set(models.map((model) => model.id)),
+        // An empty list that carries a reason says more than the generic line:
+        // the server was asked and answered. A reason alongside models would be
+        // nonsense, so it is only read on an empty result.
+        emptyReason: models.length === 0 ? d.reason : undefined,
+        baseUrl: d.baseUrl,
+      });
     } catch (e) {
       setDiscover({ phase: "error", message: e instanceof Error ? e.message : String(e) });
     }
@@ -307,7 +332,20 @@ function ProviderDiscoveryEditor({ name, provider, onChange, onAddModels }: {
         )}
         {discover.phase === "found" && (
           discover.models.length === 0 ? (
-            <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("modelsConfig.discoverNoModels")}</span>
+            discover.emptyReason === "discovery_returned_nothing" ? (
+              // omp cannot report an empty discovery as such — it refuses to boot with
+              // `No models available… set an API key`, which is the wrong advice for a
+              // provider that needs none. Say what actually happened instead.
+              <span style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.4 }}>
+                <CodeText
+                  text={t("modelsConfig.discoveryNothingFound", {
+                    url: discover.baseUrl ?? t("modelsConfig.discoveryBaseUrlUnknown"),
+                  })}
+                />
+              </span>
+            ) : (
+              <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("modelsConfig.discoverNoModels")}</span>
+            )
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               <span style={{ fontSize: 10, color: "var(--text-dim)" }}>

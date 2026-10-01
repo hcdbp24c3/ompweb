@@ -132,6 +132,14 @@ export interface DiscoveredModel {
   cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
 }
 
+/** Why a discovery came back with no models, when the route could tell.
+ *  `discovery_returned_nothing` means omp ran the configured discovery and
+ *  resolved nothing — omp reports that as its generic "No models available" boot
+ *  refusal, so the route translates it. Absent when the server answered with an
+ *  honest empty list (or the route could not distinguish the two).
+ *  Mirrors `DISCOVERY_EMPTY_REASON` in app/api/models-config/discover/route.ts. */
+export type DiscoverEmptyReason = "discovery_returned_nothing";
+
 /** Prefills a models.yml model entry from a discovered model. `null` becomes
  *  `undefined` so an unreported limit is omitted instead of written as `null`. */
 export function discoveredToModelEntry(model: DiscoveredModel): ModelEntry {

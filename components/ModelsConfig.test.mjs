@@ -125,6 +125,8 @@ const PROVIDER_EDITOR_KEYS = [
   "modelsConfig.modelsFound.one",
   "modelsConfig.modelsFound.other",
   "modelsConfig.discoverNoModels",
+  "modelsConfig.discoveryNothingFound",
+  "modelsConfig.discoveryBaseUrlUnknown",
   "modelsConfig.addSelectedModels",
   "modelsConfig.requestHeaders",
   "modelsConfig.requestHeadersHint",

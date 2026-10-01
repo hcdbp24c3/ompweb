@@ -7,10 +7,21 @@ import {
   serializeModelsConfig,
   validateModelsConfig,
 } from "@/lib/omp/models-config";
-import { type OmpModel, runIsolatedUtilityCommand } from "@/lib/omp/rpc-utility";
+import { type OmpModel, isNoModelBootFailure, runIsolatedUtilityCommand } from "@/lib/omp/rpc-utility";
 import { isRecord } from "@/lib/type-guards";
 
 export const dynamic = "force-dynamic";
+
+/** `reason` on an otherwise-successful empty discovery. Stable wire value so the
+ *  browser can map it to a localized explanation.
+ *
+ *  omp has no "discovery found nothing" signal: the child runs the discovery,
+ *  gets zero models, and falls into the same boot guard a fresh install hits
+ *  (coding-agent `main.ts:2425`, "No models available. Use /login or set an API
+ *  key…"). For a provider that declares `discovery` that advice is wrong — it
+ *  needs no key, it needs a server that answers — so the route reads the refusal
+ *  as the result it actually is and hands the UI the fact instead of the text. */
+export const DISCOVERY_EMPTY_REASON = "discovery_returned_nothing";
 
 // Model discovery contacts a remote server and spawns a throwaway omp process,
 // so it gets the same budget as the connectivity test. Unlike that route, no
@@ -60,6 +71,9 @@ function toDiscoveredModels(models: OmpModel[], providerName: string): Discovere
  */
 export async function POST(req: Request) {
   let tempDir: string | undefined;
+  // Kept outside the try so the catch can tell "omp refused because there is no
+  // model" apart from "the spawn failed", which needs the provider block.
+  let provider: ProviderConfig | undefined;
 
   try {
     const body = await req.json() as { providerName?: unknown; provider?: unknown };
@@ -70,7 +84,8 @@ export async function POST(req: Request) {
     // Same validation as the connectivity test so the two routes cannot drift.
     // It does not have to be a config omp would load as-is yet — a discovery-only
     // provider is exactly the state the user is editing.
-    const config = { providers: { [providerName]: body.provider as ProviderConfig } };
+    provider = body.provider as ProviderConfig;
+    const config = { providers: { [providerName]: provider } };
     try {
       validateModelsConfig(config);
     } catch (error) {
@@ -98,6 +113,21 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ ok: true, models, latencyMs });
   } catch (error) {
+    // omp resolved zero models for a provider whose models come from the server
+    // itself. That is the discovery's answer — which also covers a server that
+    // could not be reached at all, which is why the UI is told to check the
+    // endpoint instead of being shown omp's "set an API key" advice. Every other
+    // failure (missing binary, timeout) keeps its own error, so nothing
+    // unrelated is ever read as "no models".
+    if (provider?.discovery && isNoModelBootFailure(error)) {
+      return NextResponse.json({
+        ok: true,
+        models: [],
+        reason: DISCOVERY_EMPTY_REASON,
+        // Named so the UI can point at the endpoint that was actually asked.
+        baseUrl: provider.baseUrl,
+      });
+    }
     return NextResponse.json({ ok: false, error: errorMessage(error), code: "discover_failed" }, { status: 500 });
   } finally {
     if (tempDir) rmSync(tempDir, { recursive: true, force: true });

@@ -1489,6 +1489,8 @@
   "modelsConfig.modelsFound.one": "{count} model found",
   "modelsConfig.modelsFound.other": "{count} models found",
   "modelsConfig.discoverNoModels": "The server did not report any models for this provider.",
+  "modelsConfig.discoveryNothingFound": "omp ran the configured discovery and found no models. Check that `{url}` is running and reachable, and that `openai-models-list` targets a standard `/v1/models` endpoint — ollama and other native servers need their own discovery type.",
+  "modelsConfig.discoveryBaseUrlUnknown": "the configured server",
   "modelsConfig.addSelectedModels": "Add selected",
   "modelsConfig.requestHeaders": "Request headers",
   "modelsConfig.requestHeadersHint": "Sent with every request to this provider. Values support environment-variable and `!command` resolution.",

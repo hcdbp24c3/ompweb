@@ -1454,6 +1454,8 @@
   "modelsConfig.modelsFound.one": "{count} 件のモデルが見つかりました",
   "modelsConfig.modelsFound.other": "{count} 件のモデルが見つかりました",
   "modelsConfig.discoverNoModels": "このプロバイダーのモデルはサーバーが報告しませんでした。",
+  "modelsConfig.discoveryNothingFound": "omp は設定された discovery を実行しましたが、サーバーからモデルが返りませんでした。`{url}` が起動して到達可能かを確認し、`openai-models-list` が標準の `/v1/models` エンドポイントを指しているか確認してください（ollama などネイティブなサーバーには専用の discovery タイプが必要です）。",
+  "modelsConfig.discoveryBaseUrlUnknown": "設定されたサーバー",
   "modelsConfig.addSelectedModels": "選択したモデルを追加",
   "modelsConfig.requestHeaders": "リクエストヘッダー",
   "modelsConfig.requestHeadersHint": "このプロバイダーへの全リクエストに付与されます。値は環境変数と `!command` の解決に対応しています。",
