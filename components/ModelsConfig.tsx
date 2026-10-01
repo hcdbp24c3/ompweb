@@ -30,10 +30,14 @@ import {
   COST_LABEL_KEYS,
   DISCOVERY_TYPES,
   ENDPOINT_PRESETS,
-  LEVEL_COLORS,
   THINKING_LEVELS,
+  THINKING_MODES,
+  TOKENIZER_OPTIONS,
   discoveredToModelEntry,
+  orderedThinkingEfforts,
   presetButtonStyle,
+  thinkingLevelColor,
+  thinkingRows,
   type DiscoveredModel,
   type DiscoveryType,
   type EndpointPreset,
@@ -49,7 +53,6 @@ import {
   type RuntimeModelEntry,
   type Selection,
   type ThinkingConfig,
-  type ThinkingLevel,
 } from "./ModelsConfig-types";
 import {
   AddProviderPicker,
@@ -717,10 +720,23 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete, onAddMod
 }
 
 // ── Thinking levels editor ────────────────────────────────────────────────────
-// Edits omp's `thinking` config: `efforts` lists the enabled levels, and
-// `effortMap` overrides the string sent on the wire for a level. When every
+// Edits omp's `thinking` config: `mode` picks how the model is asked to think,
+// `efforts` lists the enabled levels, `defaultLevel` is the one it starts from,
+// and `effortMap` overrides the string sent on the wire for a level. When every
 // row is Default the config is omitted and omp derives the ladder itself.
+//
+// The ladder is a union, never THINKING_LEVELS alone: the six known names are
+// what omp's registry happens to use, and a hand-written level outside them used
+// to be deleted from models.yml on the next edit of any level.
 
+
+/** Applies a patch to the thinking block, dropping the keys it clears — and the
+ *  block itself once nothing is left in it, so resetting one select never
+ *  writes `thinking: {}` over a config that had other settings. */
+function patchThinking(value: ThinkingConfig | undefined, patch: Partial<ThinkingConfig>): ThinkingConfig | undefined {
+  const rest = Object.entries({ ...(value ?? {}), ...patch }).filter(([, entry]) => entry !== undefined);
+  return rest.length > 0 ? (Object.fromEntries(rest) as ThinkingConfig) : undefined;
+}
 
 function ThinkingEditor({
   value,
@@ -732,11 +748,21 @@ function ThinkingEditor({
   const { t } = useI18n();
   const efforts = value?.efforts;
   const effortMap = value?.effortMap ?? {};
+  // All six known levels stay rendered (a disabled one has to be re-enableable)
+  // plus every effort the file declares, so nothing is edited out of existence.
+  const rows = thinkingRows(efforts);
 
-  const setLevel = (level: ThinkingLevel, entry: string | null | "omit") => {
+  /** The two selects share one writer so clearing either of them can never
+   *  leave a half-empty block behind. */
+  const setField = (key: "mode" | "defaultLevel", raw: string) => {
+    if ((value?.[key] ?? "") === raw) return;
+    onChange(patchThinking(value, { [key]: raw || undefined }));
+  };
+
+  const setLevel = (level: string, entry: string | null | "omit") => {
     // entry: "omit" → enabled with the default wire value; null → level
     // disabled (excluded from efforts); string → enabled with a custom value.
-    const included = new Set<string>(efforts ?? [...THINKING_LEVELS]);
+    const included = new Set<string>(efforts ?? THINKING_LEVELS);
     const map: Record<string, string> = { ...effortMap };
     if (entry === null) {
       included.delete(level);
@@ -746,8 +772,11 @@ function ThinkingEditor({
       if (entry === "omit") delete map[level];
       else map[level] = entry;
     }
-    const ordered = THINKING_LEVELS.filter((l) => included.has(l));
-    if (ordered.length === 0 || (ordered.length === THINKING_LEVELS.length && Object.keys(map).length === 0)) {
+    const ordered = orderedThinkingEfforts(included);
+    // `rows`, not THINKING_LEVELS.length: a ladder that lists an effort the
+    // editor has no name for is not the auto-derived one, so resetting to auto
+    // would throw that effort away.
+    if (ordered.length === 0 || (ordered.length === rows.length && Object.keys(map).length === 0)) {
       onChange(undefined);
       return;
     }
@@ -760,14 +789,36 @@ function ThinkingEditor({
   };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-      {THINKING_LEVELS.map((level) => {
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div className="model-detail-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <FormField label={t("modelsConfig.thinkingMode")} hint={<CodeText text={t("modelsConfig.thinkingModeHint")} />}>
+          <FormSelect
+            value={value?.mode ?? ""}
+            onChange={(v) => setField("mode", v)}
+            options={THINKING_MODES}
+            placeholder={t("modelsConfig.modelDefault")}
+          />
+        </FormField>
+        <FormField
+          label={t("modelsConfig.thinkingDefaultLevel")}
+          hint={<CodeText text={t("modelsConfig.thinkingDefaultLevelHint")} />}
+        >
+          <FormSelect
+            value={value?.defaultLevel ?? ""}
+            onChange={(v) => setField("defaultLevel", v)}
+            options={efforts ?? []}
+            placeholder={t("modelsConfig.modelDefault")}
+          />
+        </FormField>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      {rows.map((level) => {
         const disabled = efforts !== undefined && !efforts.includes(level);
         const raw = disabled ? null : effortMap[level];
         const state: "omit" | "null" | "string" =
           disabled ? "null" : typeof raw === "string" ? "string" : "omit";
         const strVal = typeof raw === "string" ? raw : "";
-        const color = LEVEL_COLORS[level];
+        const color = thinkingLevelColor(level);
 
         const btnBase: React.CSSProperties = {
           padding: "4px var(--control-padding-inline)",
@@ -794,6 +845,8 @@ function ThinkingEditor({
         return (
           <div
             key={level}
+            role="group"
+            aria-label={level}
             style={{
               display: "flex",
               alignItems: "center",
@@ -863,11 +916,54 @@ function ThinkingEditor({
           </div>
         );
       })}
+      </div>
     </div>
   );
 }
 
 // ── Model detail ──────────────────────────────────────────────────────────────
+
+/** omp's per-model capability overrides: whether the model is offered tools at
+ *  all, and how many premium requests it costs. Both are opt-in, so a `false` is
+ *  dropped rather than written — an absent key and `supportsTools: false` mean
+ *  the same thing to omp, and the file should not carry the difference. */
+function ModelCapabilitiesEditor({ model, onChange }: {
+  model: ModelEntry; onChange: (m: ModelEntry) => void;
+}) {
+  const { t } = useI18n();
+  const setMultiplier = (raw: string) => {
+    const parsed = parseFloat(raw);
+    onChange({ ...model, premiumMultiplier: isNaN(parsed) ? undefined : parsed });
+  };
+  return (
+    <FieldGroup
+      label={
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+          <SlidersHorizontal size={11} aria-hidden="true" /> {t("modelsConfig.capabilities")}
+        </span>
+      }
+    >
+      <FormCheck
+        label={t("modelsConfig.supportsTools")}
+        checked={model.supportsTools ?? false}
+        onChange={(v) => onChange({ ...model, supportsTools: v || undefined })}
+      />
+      <p style={{ margin: 0, fontSize: 10, color: "var(--text-dim)", lineHeight: 1.4 }}>
+        <CodeText text={t("modelsConfig.supportsToolsHint")} />
+      </p>
+      <FormField
+        label={t("modelsConfig.premiumMultiplier")}
+        hint={<CodeText text={t("modelsConfig.premiumMultiplierHint")} />}
+      >
+        <NumInput
+          value={model.premiumMultiplier !== undefined ? String(model.premiumMultiplier) : ""}
+          onChange={setMultiplier}
+          placeholder="1"
+        />
+      </FormField>
+    </FieldGroup>
+  );
+}
 
 
 function ModelDetail({
@@ -894,6 +990,27 @@ function ModelDetail({
   };
   const idValidate = () => (!model.id.trim() ? t("modelsConfig.errorIdRequired") : null);
   const idV = useFieldValidation(idValidate);
+
+  // maxContextWindow caps a variable context window, so omp requires a positive
+  // safe integer that is not smaller than contextWindow. The draft is local:
+  // an entry that breaks the rule is reported inline and left out of models.yml
+  // rather than written and bounced by the server on save.
+  const [maxContextDraft, setMaxContextDraft] = useState<string | null>(null);
+  const maxContextValue = maxContextDraft ?? (model.maxContextWindow !== undefined ? String(model.maxContextWindow) : "");
+  const maxContextProblem = (raw: string): string | null => {
+    if (!raw) return null;
+    const parsed = Number(raw);
+    if (!Number.isSafeInteger(parsed) || parsed <= 0) return t("modelsConfig.maxContextWindowInvalid");
+    if (model.contextWindow !== undefined && parsed < model.contextWindow) return t("modelsConfig.maxContextWindowTooSmall");
+    return null;
+  };
+  const maxContextV = useFieldValidation(() => maxContextProblem(maxContextValue.trim()));
+  const setMaxContextWindow = (raw: string) => {
+    setMaxContextDraft(raw);
+    maxContextV.onChange();
+    const trimmed = raw.trim();
+    set("maxContextWindow", !trimmed || maxContextProblem(trimmed) ? undefined : Number(trimmed));
+  };
   const testSummary = (() => {
     if (testState.phase === "idle") return null;
     if (testState.phase === "testing") return t("modelsConfig.validatingConfig");
@@ -987,6 +1104,24 @@ function ModelDetail({
           />
         </FormField>
 
+        <FormField label={t("modelsConfig.baseUrlOverride")}>
+          <TextInput
+            value={model.baseUrl ?? ""}
+            onChange={(v) => set("baseUrl", v || undefined)}
+            placeholder={t("modelsConfig.inheritNone")}
+            mono
+          />
+        </FormField>
+
+        <FormField label={t("modelsConfig.tokenizer")} hint={<CodeText text={t("modelsConfig.tokenizerHint")} />}>
+          <FormSelect
+            value={model.tokenizer ?? ""}
+            onChange={(v) => set("tokenizer", (v || undefined) as ModelEntry["tokenizer"])}
+            options={TOKENIZER_OPTIONS}
+            placeholder={t("modelsConfig.inheritNone")}
+          />
+        </FormField>
+
         <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
           <FormCheck
             label={t("modelsConfig.reasoningThinking")}
@@ -1054,8 +1189,32 @@ function ModelDetail({
               placeholder="16384"
             />
           </FormField>
+          <FormField
+            label={t("modelsConfig.maxContextWindow")}
+            hint={<CodeText text={t("modelsConfig.maxContextWindowHint")} />}
+            error={maxContextV.error}
+          >
+            <NumInput
+              value={maxContextValue}
+              onChange={setMaxContextWindow}
+              placeholder="1000000"
+              invalid={Boolean(maxContextV.error)}
+              error={maxContextV.error}
+              onBlurValidate={maxContextV.onBlur}
+            />
+          </FormField>
         </div>
+        <FormCheck
+          label={t("modelsConfig.omitMaxOutputTokens")}
+          checked={model.omitMaxOutputTokens ?? false}
+          onChange={(v) => set("omitMaxOutputTokens", v || undefined)}
+        />
+        <p style={{ margin: 0, fontSize: 10, color: "var(--text-dim)", lineHeight: 1.4 }}>
+          <CodeText text={t("modelsConfig.omitMaxOutputTokensHint")} />
+        </p>
       </FieldGroup>
+
+      <ModelCapabilitiesEditor model={model} onChange={onChange} />
 
       <FieldGroup label={t("modelsConfig.costPerMillion")}>
         <div className="model-detail-grid-4" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10 }}>

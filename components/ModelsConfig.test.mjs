@@ -8,7 +8,17 @@ const jiti = createJiti(import.meta.url, {
   tsconfigPaths: true,
 });
 const { providerInitials } = await jiti.import("./ModelsConfig.tsx");
-const { API_OPTIONS, DISCOVERY_TYPES, TOKENIZER_OPTIONS } = await jiti.import("./ModelsConfig-types.ts");
+const {
+  API_OPTIONS,
+  DISCOVERY_TYPES,
+  LEVEL_COLORS,
+  THINKING_LEVELS,
+  THINKING_MODES,
+  TOKENIZER_OPTIONS,
+  orderedThinkingEfforts,
+  thinkingLevelColor,
+  thinkingRows,
+} = await jiti.import("./ModelsConfig-types.ts");
 
 test("provider glyphs derive from arbitrary runtime provider ids", () => {
   assert.equal(providerInitials("acme-provider"), "AP");
@@ -151,3 +161,123 @@ test("the provider editor hardcodes no user-facing English", () => {
 });
 
 
+// ── Thinking ladder ──────────────────────────────────────────────────────────
+// The editor used to rebuild `efforts` as THINKING_LEVELS.filter(...), which
+// silently deleted every effort that is not one of the six known names the next
+// time the user touched an unrelated field. models.yml is hand-written and omp's
+// own catalog uses levels this list has never heard of, so the ladder has to be
+// a union: known names in canonical order, then whatever the file declares.
+
+test("THINKING_MODES matches omp's thinking mode enum", () => {
+  assert.deepEqual([...THINKING_MODES], [
+    "effort",
+    "budget",
+    "google-level",
+    "anthropic-adaptive",
+    "anthropic-budget-effort",
+  ]);
+});
+
+test("an effort outside THINKING_LEVELS survives an edit to a known one", () => {
+  const configured = ["low", "medium", "ultra"];
+  const included = new Set(configured);
+  included.delete("low");
+
+  assert.deepEqual(
+    orderedThinkingEfforts(included),
+    ["medium", "ultra"],
+    "toggling one level must not delete a hand-written effort",
+  );
+});
+
+test("the known ladder is written back in canonical order, unknown ones after it", () => {
+  assert.deepEqual(orderedThinkingEfforts(["max", "ultra", "low"]), ["low", "max", "ultra"]);
+});
+
+test("an unset efforts list means the full known ladder", () => {
+  assert.deepEqual(orderedThinkingEfforts(THINKING_LEVELS), [...THINKING_LEVELS]);
+});
+
+test("thinkingRows offers every known level plus whatever the file declares", () => {
+  assert.deepEqual(thinkingRows(undefined), [...THINKING_LEVELS], "an auto-derived ladder still shows all six toggles");
+  assert.deepEqual(thinkingRows(["ultra"]), [...THINKING_LEVELS, "ultra"]);
+  assert.deepEqual(thinkingRows(["ultra", "turbo"]), [...THINKING_LEVELS, "ultra", "turbo"], "in the order the file listed them");
+});
+
+test("an unknown effort gets the neutral dot instead of an undefined colour", () => {
+  assert.equal(thinkingLevelColor("max"), LEVEL_COLORS.max);
+  assert.equal(thinkingLevelColor("ultra"), "var(--text-dim)");
+});
+
+// ── i18n for the model editor ────────────────────────────────────────────────
+// Scoped the same way as the provider editor above: the two components this task
+// owns. ModelDetail keeps pre-existing hardcoded English in its placeholders, so
+// the keys it gained are pinned by name instead.
+
+const MODEL_EDITOR_KEYS = [
+  "modelsConfig.thinkingMode",
+  "modelsConfig.thinkingModeHint",
+  "modelsConfig.thinkingDefaultLevel",
+  "modelsConfig.thinkingDefaultLevelHint",
+  "modelsConfig.modelDefault",
+  "modelsConfig.capabilities",
+  "modelsConfig.supportsTools",
+  "modelsConfig.supportsToolsHint",
+  "modelsConfig.premiumMultiplier",
+  "modelsConfig.premiumMultiplierHint",
+  "modelsConfig.baseUrlOverride",
+  "modelsConfig.tokenizer",
+  "modelsConfig.tokenizerHint",
+  "modelsConfig.maxContextWindow",
+  "modelsConfig.maxContextWindowHint",
+  "modelsConfig.maxContextWindowInvalid",
+  "modelsConfig.maxContextWindowTooSmall",
+  "modelsConfig.omitMaxOutputTokens",
+  "modelsConfig.omitMaxOutputTokensHint",
+];
+
+/** The components this task added or rewrote, so hardcoded English elsewhere in
+ *  ModelsConfig.tsx does not mask — or excuse — a regression here. */
+function addedModelEditorSource() {
+  const source = readFileSync(new URL("./ModelsConfig.tsx", import.meta.url), "utf8");
+  const thinking = source.slice(source.indexOf("function ThinkingEditor"), source.indexOf("function ModelDetail"));
+  const capabilities = source.slice(source.indexOf("function ModelCapabilitiesEditor"), source.indexOf("function ModelDetail"));
+  assert.notEqual(thinking.length, 0, "ThinkingEditor not found in ModelsConfig.tsx");
+  assert.notEqual(capabilities.length, 0, "ModelCapabilitiesEditor not found in ModelsConfig.tsx");
+  return thinking + capabilities;
+}
+
+test("every model-editor key is translated in all three locales", () => {
+  for (const locale of LOCALES) {
+    const missing = MODEL_EDITOR_KEYS.filter((key) => typeof DICTIONARIES[locale][key] !== "string");
+    assert.deepEqual(missing, [], `missing in ${locale}`);
+  }
+});
+
+test("the model editor translates every key it looks up", () => {
+  const added = addedModelEditorSource();
+  const plain = [...added.matchAll(/\bt\("([^"]+)"/g)].map((match) => match[1]);
+  const plural = [...added.matchAll(/\btn\("([^"]+)"/g)].flatMap((match) => [`${match[1]}.one`, `${match[1]}.other`]);
+  const referenced = [...plain, ...plural];
+
+  assert.ok(referenced.length >= 10, `expected the new controls to use i18n, saw ${referenced.length} keys`);
+
+  for (const locale of LOCALES) {
+    const missing = referenced.filter((key) => typeof DICTIONARIES[locale][key] !== "string");
+    assert.deepEqual(missing, [], `missing from ${locale}.json`);
+  }
+});
+
+test("the model editor hardcodes no user-facing English", () => {
+  const source = addedModelEditorSource();
+  const isProse = (value) =>
+    /^[A-Za-z][A-Za-z'’.\-]*(\s+[A-Za-z][A-Za-z'’.\-]*)+$/.test(value.trim())
+    && (value.match(/[A-Za-z]{3,}/g) ?? []).length >= 2
+    && !/[\d%()]/.test(value);
+
+  const quoted = [...source.matchAll(/"([^"\\\n]{2,})"/g)].map((match) => match[1]);
+  const jsxText = [...source.matchAll(/>\s*([A-Za-z][^<>{}]*?)</g)].map((match) => match[1]);
+  const prose = [...quoted, ...jsxText].filter(isProse);
+
+  assert.deepEqual([...new Set(prose)], [], "user-facing text must go through t()/tn()");
+});
