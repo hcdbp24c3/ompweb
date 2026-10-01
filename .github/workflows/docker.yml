@@ -70,8 +70,11 @@ jobs:
           # A PR from a fork has a read-only GITHUB_TOKEN, so it builds but does
           # not publish — and `merge` is gated on push-only for the same reason.
           push: ${{ github.event_name != 'pull_request' }}
+          # No `tags:` here on purpose. With push-by-digest the registry rejects
+          # a tagged ref ("can't push tagged ref ... by digest"); the tags are
+          # attached later by the merge job, which is the whole point of the
+          # digest hand-off.
           outputs: type=image,push-by-digest=true,name-canonical=true,push=true
-          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             OMP_VERSION=${{ vars.OMP_VERSION || 'latest' }}
