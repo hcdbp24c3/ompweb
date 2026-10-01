@@ -82,7 +82,6 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           mkdir -p /tmp/digests
-          touch "/tmp/digests/${{ steps.build.outputs.digest#sha256: }}"
           echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.platform }}"
 
       - name: Upload digest
@@ -138,11 +137,16 @@ jobs:
 
       - name: Create and push manifest
         run: |
-          digests=$(cat /tmp/digests/* | tr '\n' ' ')
+          # The tag list is newline-separated; turn it into `--tag X --tag Y` flags.
+          # shellcheck disable=SC2046
+          set -- ${{ steps.meta.outputs.tags }}
+          flags=""
+          for tag in "$@"; do
+            flags="${flags} --tag ${tag}"
+          done
+          # Deliberately unquoted: each element is one argument we want split.
           # shellcheck disable=SC2086
-          docker buildx imagetools create \
-            $(for t in ${{ steps.meta.outputs.tags }}; do echo -n "--tag $t "; done) \
-            $digests
+          docker buildx imagetools create ${flags} $(cat /tmp/digests/*)
 
       - name: Inspect the published manifest
         run: |
