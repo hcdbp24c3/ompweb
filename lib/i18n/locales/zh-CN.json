@@ -1485,6 +1485,7 @@
   "modelsConfig.thinkingModeHint": "如何要求模型进行思考。保持模型默认即可由 omp 选择模式。",
   "modelsConfig.thinkingDefaultLevel": "默认等级",
   "modelsConfig.thinkingDefaultLevelHint": "对话开始时使用的思考等级，只能从下方已启用的等级中选择。",
+  "modelsConfig.defaultLevelCleared": "`{level}` 原为默认等级，现已禁用，因此默认等级也被清除——omp 会从剩余启用的等级中推导。",
   "agentsConfig.descPlaceholder": "例如：负责 UI/UX 设计与前端实现的专业智能体",
   "agentsConfig.systemPromptPlaceholder": "智能体系统指令…",
   "usageConfig.title": "用量与分析",

@@ -1485,6 +1485,7 @@
   "modelsConfig.thinkingModeHint": "思考の依頼方法です。モデルの既定のままなら omp がモードを選びます。",
   "modelsConfig.thinkingDefaultLevel": "既定のレベル",
   "modelsConfig.thinkingDefaultLevelHint": "会話を開始する時の思考レベルです。下で有効にしたレベルからしか選べません。",
+  "modelsConfig.defaultLevelCleared": "`{level}` が既定のレベルでしたが、無効にしたため既定値も解除しました。残ったレベルから omp が決定します。",
   "agentsConfig.descPlaceholder": "UI/UX specialist for design implementation",
   "agentsConfig.systemPromptPlaceholder": "Agent instructions…",
   "usageConfig.title": "利用状況",

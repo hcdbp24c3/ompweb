@@ -251,6 +251,7 @@ const MODEL_EDITOR_KEYS = [
   "modelsConfig.thinkingModeHint",
   "modelsConfig.thinkingDefaultLevel",
   "modelsConfig.thinkingDefaultLevelHint",
+  "modelsConfig.defaultLevelCleared",
   "modelsConfig.modelDefault",
   "modelsConfig.capabilities",
   "modelsConfig.supportsTools",
