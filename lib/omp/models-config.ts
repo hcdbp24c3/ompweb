@@ -11,6 +11,38 @@ import { isRecord } from "../type-guards";
  * web editor round-trips; unknown fields are preserved untouched.
  */
 
+/** omp's ProviderDiscoverySchema discriminant. The list is copied from the
+ * schema, not from omp's docs — `apple-foundation-models` is undocumented. */
+export type DiscoveryType =
+  | "ollama"
+  | "llama.cpp"
+  | "lm-studio"
+  | "openai-models-list"
+  | "proxy"
+  | "litellm"
+  | "apple-foundation-models";
+
+/** Lets omp resolve a provider's model list from the server itself, so the
+ * models never have to be written out by hand. `injectV1` (defaults to true)
+ * only means something for `openai-models-list`, the one type whose URL is
+ * built by injecting `/v1`. */
+export interface ProviderDiscovery {
+  type: DiscoveryType;
+  timeoutMs?: number;
+  injectV1?: boolean;
+}
+
+/** omp's ModelTokenizerSchema: tokenizers with bespoke offset tables. */
+export type Tokenizer =
+  | "claude-v3"
+  | "claude-v47"
+  | "claude-v5"
+  | "claude-v5-sonnet"
+  | "qwen3"
+  | "deepseek-v3"
+  | "kimi-k2"
+  | "glm5";
+
 export interface ModelThinkingConfig {
   mode?: string;
   efforts?: string[];
@@ -28,10 +60,17 @@ export interface ModelDefinition {
   thinking?: ModelThinkingConfig;
   input?: string[];
   contextWindow?: number;
+  /** Upper bound of the variable context window; must be >= contextWindow. */
+  maxContextWindow?: number;
   maxTokens?: number;
   headers?: Record<string, string>;
   cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
   compat?: Record<string, unknown>;
+  supportsTools?: boolean;
+  tokenizer?: Tokenizer;
+  /** Send the provider's own max output cap instead of this model's maxTokens. */
+  omitMaxOutputTokens?: boolean;
+  premiumMultiplier?: number;
   [key: string]: unknown;
 }
 
@@ -42,6 +81,11 @@ export interface ProviderConfig {
   auth?: "apiKey" | "none" | "oauth";
   headers?: Record<string, string>;
   compat?: Record<string, unknown>;
+  discovery?: ProviderDiscovery;
+  /** Send the key as `Authorization:` rather than the api's default header. */
+  authHeader?: boolean;
+  /** Relax anthropic-messages tool schemas for Anthropic-compatible proxies. */
+  disableStrictTools?: boolean;
   models?: ModelDefinition[];
   modelOverrides?: Record<string, unknown>;
   [key: string]: unknown;
@@ -52,8 +96,9 @@ export interface ModelsFileConfig {
   [key: string]: unknown;
 }
 
-/** Mirrors validateProviderConfiguration(mode: "models-config") closely enough
- * to reject configs omp itself would refuse to load. Throws on failure. */
+/** Mirrors validateProviderConfiguration(mode: "models-config") in omp's
+ * coding-agent/src/config/models-config.ts, plus the narrows on
+ * ProviderDiscoverySchema and ModelDefinitionSchema. Throws on failure. */
 export function validateModelsConfig(config: ModelsFileConfig): void {
   if (!isRecord(config)) throw new Error("Config must be an object");
   config = sanitizeModelsConfig(config);
@@ -62,6 +107,7 @@ export function validateModelsConfig(config: ModelsFileConfig): void {
   for (const [providerName, provider] of Object.entries(providers)) {
     if (!isRecord(provider)) throw new Error(`Provider ${providerName}: must be an object`);
     const models = Array.isArray(provider.models) ? provider.models : [];
+    const discovery = provider.discovery;
     if (models.length > 0) {
       if (!provider.baseUrl) {
         throw new Error(`Provider ${providerName}: "baseUrl" is required when defining custom models.`);
@@ -69,7 +115,50 @@ export function validateModelsConfig(config: ModelsFileConfig): void {
       if (!provider.apiKey && (provider.auth ?? "apiKey") !== "none") {
         throw new Error(`Provider ${providerName}: "apiKey" is required when defining custom models unless auth is "none".`);
       }
+    } else {
+      // A provider without models is only reachable if it declares something
+      // that still points at a server. omp tests truthiness, so
+      // `disableStrictTools: false` and an empty modelOverrides map do not count.
+      const hasModelOverrides = isRecord(provider.modelOverrides) && Object.keys(provider.modelOverrides).length > 0;
+      if (
+        !provider.baseUrl &&
+        !provider.headers &&
+        !provider.apiKey &&
+        provider.auth !== "none" &&
+        !provider.compat &&
+        !provider.disableStrictTools &&
+        !provider.guardrailIdentifier &&
+        !provider.requestMetadata &&
+        !provider.remoteCompaction &&
+        !hasModelOverrides &&
+        !discovery
+      ) {
+        throw new Error(
+          `Provider ${providerName}: must specify "baseUrl", "headers", "apiKey", "auth: none", "compat", "disableStrictTools", "guardrailIdentifier", "requestMetadata", "remoteCompaction", "modelOverrides", "discovery", or "models"`,
+        );
+      }
     }
+
+    if (discovery) {
+      if (!isRecord(discovery)) {
+        throw new Error(`Provider ${providerName}: "discovery" must be an object`);
+      }
+      // "proxy" is exempt: it forwards the api the model ends up using, so a
+      // provider-level api would be redundant.
+      if (!provider.api && discovery.type !== "proxy") {
+        throw new Error(`Provider ${providerName}: "api" is required when discovery is enabled at provider level.`);
+      }
+      if (discovery.injectV1 !== undefined && discovery.type !== "openai-models-list") {
+        throw new Error(`Provider ${providerName}: discovery.injectV1 is only valid for "openai-models-list" discovery.`);
+      }
+      if (
+        discovery.timeoutMs !== undefined &&
+        (typeof discovery.timeoutMs !== "number" || discovery.timeoutMs <= 0 || !Number.isFinite(discovery.timeoutMs))
+      ) {
+        throw new Error(`Provider ${providerName}: discovery.timeoutMs must be a positive finite number.`);
+      }
+    }
+
     for (const model of models) {
       if (!isRecord(model) || typeof model.id !== "string" || !model.id) {
         throw new Error(`Provider ${providerName}: model missing "id"`);
@@ -82,6 +171,18 @@ export function validateModelsConfig(config: ModelsFileConfig): void {
       }
       if (typeof model.maxTokens === "number" && model.maxTokens <= 0) {
         throw new Error(`Provider ${providerName}, model ${model.id}: invalid maxTokens`);
+      }
+      // maxContextWindow caps the variable window, so it can never be smaller
+      // than the base contextWindow.
+      if (
+        model.maxContextWindow !== undefined &&
+        (!Number.isSafeInteger(model.maxContextWindow) ||
+          model.maxContextWindow <= 0 ||
+          (typeof model.contextWindow === "number" && model.maxContextWindow < model.contextWindow))
+      ) {
+        throw new Error(
+          `Provider ${providerName}, model ${model.id}: maxContextWindow must be a positive integer no smaller than contextWindow`,
+        );
       }
       // omp's schema requires all four cost fields whenever cost is present
       // (partial costs make omp reject the whole file), so refuse to write one.

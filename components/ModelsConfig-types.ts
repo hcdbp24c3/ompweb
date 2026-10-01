@@ -42,15 +42,60 @@ export interface ThinkingConfig {
   effortMap?: Record<string, string>;
 }
 
+// Option lists are copied from omp's schema bundles, not from its docs: the
+// docs omit `apple-foundation-models`, and the two extra api ids only exist in
+// the schema. The union types are derived from the lists so a value can never
+// be valid for the type and missing from the dropdown (or vice versa).
+export const DISCOVERY_TYPES = [
+  "ollama",
+  "llama.cpp",
+  "lm-studio",
+  "openai-models-list",
+  "proxy",
+  "litellm",
+  "apple-foundation-models",
+] as const;
+export type DiscoveryType = typeof DISCOVERY_TYPES[number];
+
+export const TOKENIZER_OPTIONS = [
+  "claude-v3",
+  "claude-v47",
+  "claude-v5",
+  "claude-v5-sonnet",
+  "qwen3",
+  "deepseek-v3",
+  "kimi-k2",
+  "glm5",
+] as const;
+export type Tokenizer = typeof TOKENIZER_OPTIONS[number];
+
+/** Lets omp ask the server for the model list instead of the user writing it
+ * out. `injectV1` only applies to `openai-models-list` (omp's schema rejects
+ * it elsewhere), and `proxy` is the one type that needs no provider-level api. */
+export interface ProviderDiscovery {
+  type: DiscoveryType;
+  timeoutMs?: number;
+  injectV1?: boolean;
+}
+
 export interface ModelEntry {
   id: string;
   name?: string;
   api?: string;
+  /** Per-model endpoint override; the provider's baseUrl is used when absent. */
+  baseUrl?: string;
   reasoning?: boolean;
   thinking?: ThinkingConfig;
   input?: string[];
   contextWindow?: number;
+  /** Upper bound of the variable context window; must be >= contextWindow. */
+  maxContextWindow?: number;
   maxTokens?: number;
+  headers?: Record<string, string>;
+  supportsTools?: boolean;
+  tokenizer?: Tokenizer;
+  omitMaxOutputTokens?: boolean;
+  premiumMultiplier?: number;
   cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
   compat?: Record<string, unknown>;
 }
@@ -61,6 +106,9 @@ export interface ProviderEntry {
   apiKey?: string;
   auth?: "apiKey" | "none" | "oauth";
   headers?: Record<string, string>;
+  discovery?: ProviderDiscovery;
+  authHeader?: boolean;
+  disableStrictTools?: boolean;
   compat?: Record<string, unknown>;
   models?: ModelEntry[];
   modelOverrides?: Record<string, unknown>;
@@ -110,7 +158,7 @@ export type RetrySettings = {
 };
 export const COMPOSER_MODELS_STORAGE_KEY = "omp-composer-models";
 export const NATIVE_MODEL_ROLES = ["default", "smol", "slow", "vision", "plan", "designer", "commit", "tiny", "task", "advisor"];
-// omp's models.yml ApiSchema (config/models-config-schema.ts)
+// omp's models.yml ApiSchema (config/models-config-schema-bundle.ts)
 export const API_OPTIONS = [
   "openai-completions",
   "openai-responses",
@@ -121,6 +169,8 @@ export const API_OPTIONS = [
   "google-generative-ai",
   "google-gemini-cli",
   "google-vertex",
+  "openrouter-decisions",
+  "typesafe",
 ] as const;
 export const hoverRow = (selected: boolean) => ({
   onMouseEnter: (e: React.MouseEvent<HTMLElement>) => { if (!selected) e.currentTarget.style.background = "var(--bg-hover)"; },
