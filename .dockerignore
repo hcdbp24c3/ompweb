@@ -1,0 +1,38 @@
+# Build context is the whole repo (`COPY . .`), so anything that would break
+# `npm ci` or poison the compiled `.next` has to be excluded.
+
+# Dependencies are installed inside the image from the lockfile, never copied
+# from the host — a host node_modules (possibly pnpm, possibly arm64) would make
+# the image non-reproducible and would break `npm prune --omit=dev`.
+node_modules
+.pnpm-store
+
+# A host `.next` must never leak in: `next build` would reuse mismatched caches
+# and the image would ship artifacts built from someone else's tree. This is the
+# exact hazard AGENTS.md warns about ("never run `next build` during dev").
+.next
+next-env.d.ts
+
+# Repo-local agent state and hives.
+.hive
+.hive2
+omp-web-out
+*.tsbuildinfo
+
+.git
+.gitignore
+
+# Editor / OS noise.
+.vscode
+.idea
+.DS_Store
+*.swp
+
+# CI config is not needed to build the image, and copying it in would invalidate
+# the source layer on every workflow tweak.
+.github
+
+# Docs and scratch files.
+*.md
+!AGENTS.md
+LICENSE*

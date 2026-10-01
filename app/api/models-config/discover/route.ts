@@ -20,8 +20,13 @@ export const dynamic = "force-dynamic";
  *  (coding-agent `main.ts:2425`, "No models available. Use /login or set an API
  *  key…"). For a provider that declares `discovery` that advice is wrong — it
  *  needs no key, it needs a server that answers — so the route reads the refusal
- *  as the result it actually is and hands the UI the fact instead of the text. */
-export const DISCOVERY_EMPTY_REASON = "discovery_returned_nothing";
+ *  as the result it actually is and hands the UI the fact instead of the text. *
+ *
+ *  Deliberately NOT exported: Next types every route module against
+ *  `{[x: string]: never}` for non-route exports, and that check only runs in
+ *  `next build` — `tsc --noEmit` passes with this `export` in place. The client
+ *  mirror is the `DiscoverEmptyReason` type in components/ModelsConfig-types.ts. */
+const DISCOVERY_EMPTY_REASON = "discovery_returned_nothing";
 
 // Model discovery contacts a remote server and spawns a throwaway omp process,
 // so it gets the same budget as the connectivity test. Unlike that route, no
