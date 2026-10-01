@@ -74,6 +74,7 @@ app/api/
   models/route.ts                 GET { models, modelList, defaultModel }
   models-config/route.ts          GET/PUT — read/write ~/.omp/agent/models.yml
   models-config/test/route.ts     POST test a configured model/provider
+  models-config/discover/route.ts POST discover a provider's model list (throwaway agent dir)
   omp-settings/route.ts           GET/PUT native config.yml settings (allow-listed)
   web-settings/route.ts           GET/PUT omp-web's own server settings (auto-resume)
   mcp/route.ts                    GET/POST/PUT/DELETE project MCP servers
@@ -377,6 +378,90 @@ handled or safely ignored.
 - Auth flows go through RPC commands (`get_login_providers`, `login`) against the omp child process; credentials live in omp's `agent.db` (SQLite) which omp-web never touches directly.
 - The Models panel reads and writes `models.yml` in the omp agent directory (`~/.omp/agent/models.yml`, `.yaml` fallback).
 - API-key status endpoints must never return the raw key.
+
+#### Utility processes must be forced to boot a model (`lib/omp/rpc-utility.ts`)
+- omp `process.exit(1)`s when it resolves **zero** models, and that check runs
+  *before* the `mode === "rpc"` branch (coding-agent `main.ts:2425`), so the
+  child dies before printing its `ready` frame and **no command is ever
+  answered**. On a fresh install that made the provider list unreachable: every
+  provider-list route (`/api/auth/providers`, `/api/auth/all-providers`) shares
+  the one `runUtilityCommand` process, so you could not open the UI that adds
+  your first model. Not a transport bug — the process is already gone, it has to
+  boot.
+- `withBootModelFallback` tries **no selector first** (so a user who already has
+  a model gets byte-identical behaviour), then each `BOOT_MODEL_CANDIDATES` id
+  in order, stopping at the first success. `isNoModelBootFailure` gates the
+  retry on omp's own wording (`No models available` / `Model "…" not found`) so
+  a missing binary or a timeout is rethrown untouched; when every candidate is
+  rejected the last omp error surfaces verbatim.
+- **Only the `--no-session` utility process is forced.** `lib/rpc-manager.ts`
+  (real sessions) must keep the model the user picked — passing a selector there
+  would break model switching.
+- The candidate list is measured, not guessed: the first id resolves on the
+  installed catalog, the rest are fallbacks for a future catalog that drops it.
+  Ids that do not exist (`openai-codex/gpt-5-codex`) are deliberately excluded,
+  and a test pins that.
+- `runIsolatedUtilityCommand` (used by `/api/models-config/test` and
+  `/api/models-config/discover`) deliberately does **not** retry. A
+  discovery-only provider resolves its own model so the guard never fires there,
+  and a command *response* may legitimately contain "No models available" text —
+  retrying after the send would respawn against a healthy process. Separating
+  boot from send would touch the abort/dispose lifecycle; don't do it casually.
+
+#### Model discovery (`/api/models-config/discover`)
+- `get_available_models` returns catalog **and** discovered models, so the
+  provider editor's "Discover models" button is a plain RPC call. There is no
+  discovery-refresh RPC command, and omp-web must not shell out to
+  `omp models refresh`, which refreshes the whole catalog instead of one
+  provider.
+- The route writes the provider under test to a **throwaway `mkdtemp` agent
+  dir** with `OMP_PROFILE`/`PI_PROFILE`/`XDG_DATA_HOME` cleared, so the real
+  `~/.omp` is never touched. The cost of that isolation is that the child has no
+  stored credentials and no cached catalog: a provider whose key lives in omp's
+  `agent.db` cannot authenticate here, so discovery needs a `baseUrl` reachable
+  without auth (or a key in the environment). Same limitation as
+  `/api/models-config/test`.
+- omp caches per-provider discovery results in `<agent-dir>/models.db` (a
+  `model_cache` table keyed by provider id; default `cacheTtlMs` is 2h in
+  18.4.6, revalidated by a `static_fingerprint` — **not** by the models.yml
+  mtime). A throwaway agent dir therefore always starts cold, which is exactly
+  what keeps the route cheap and side-effect-free.
+
+#### The editor renders only part of the schema — and that is load-bearing
+- Editable today: provider `baseUrl`/`api`/`apiKey`/`auth`/`headers`/
+  `discovery{type,timeoutMs,injectV1}`/`authHeader`/`disableStrictTools`, and
+  model `id`/`name`/`api`/`baseUrl`/`reasoning`/`input`/`contextWindow`/
+  `maxContextWindow`/`maxTokens`/`omitMaxOutputTokens`/`tokenizer`/
+  `supportsTools`/`premiumMultiplier`/`cost`/
+  `thinking{mode,efforts,defaultLevel}`. `authHeader` only appears with an
+  `apiKey` and `disableStrictTools` only for `api: anthropic-messages`, and both
+  are cleared when the precondition goes away.
+- Still round-trip-only (no control — editable in the YAML by hand only):
+  `compat`, model-level `headers`, `modelOverrides`, `remoteCompaction`,
+  `guardrail*`, `transport`, `requestMetadata`, `promptCache`,
+  `preferWebsockets`, `imageInputDecoder`, `contextPromotionTarget`,
+  `compactionModel`. They survive on the `[key: string]: unknown` index
+  signature, **not** because anything writes them.
+- A field survives a write only if it is in the payload the client sends:
+  `mergeNode` deletes every map key absent from the value it merges
+  (`lib/omp/models-config.ts`). So **adding a type without a control is data loss
+  waiting to happen** — the field dies the first time anything rebuilds that
+  object. Either add both, or state explicitly that the field is not editable
+  from the UI.
+- **An editable list of known enum values is not a schema.** `models.yml` is
+  hand-written, so any list copied from omp's catalog can be incomplete:
+  `DISCOVERY_TYPES` holds 7 values (the docs list 6) and `API_OPTIONS` 11. Both
+  data-loss bugs in this editor came from treating such a list as the full value
+  set. The pattern is "known values first, then union with whatever the file
+  declares" — `thinkingRows` / `orderedThinkingEfforts` in
+  `ModelsConfig-types.ts` are the reference. Reuse it for every new enum.
+- Known gaps, deliberately left alone: disabling the effort that
+  `thinking.defaultLevel` names leaves it dangling (server validation does not
+  check the pair — clearing the level would silently discard intent, blocking
+  the disable would invent a rule). And omp accepts `auth: "oauth"` with custom
+  models where omp-web accepts only `"none"`; the UI offers `auth` solely as the
+  `No API key required (auth: none)` checkbox, so it can never write `oauth` and
+  the divergence is only reachable from hand-written YAML.
 
 ### Composer word prediction (`hooks/useWordPrediction.ts`, `components/GhostMirror.tsx`)
 - Ghost text comes from omp's `predict_word` RPC (engine = omp's
