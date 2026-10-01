@@ -249,6 +249,27 @@ test("an empty discovery result is a valid answer, not a failure", async (t) => 
   assert.equal(screen.queryByRole("button", { name: "Add selected" }), null);
 });
 
+test("a discovered model is not printed twice when its name is its id", async (t) => {
+  const user = userEvent.setup();
+  await openProvider(t, {
+    provider: { ...BASE_PROVIDER, discovery: { type: "ollama" } },
+    discover: () => jsonResponse({
+      ok: true,
+      latencyMs: 3,
+      models: [{ id: "qwen3-coder" }, { id: "llama-3.3", name: "Llama 3.3" }],
+    }),
+  });
+
+  await user.click(screen.getByRole("button", { name: "Discover models" }));
+
+  /** The row is a <label> wrapping the tick, the label and the id, so the
+   *  checkbox's own aria-label is not enough to judge what was rendered. */
+  const rowText = (id) => screen.getByLabelText(id).closest("label").textContent;
+  assert.equal(rowText("qwen3-coder").match(/qwen3-coder/g).length, 1, "an unnamed model shows its id once");
+  assert.match(rowText("llama-3.3"), /Llama 3\.3/, "a named model still shows its name");
+  assert.match(rowText("llama-3.3"), /llama-3\.3/, "…and its id, which is not the name");
+});
+
 test("the headers editor writes, renames and removes key/value pairs", async (t) => {
   const user = userEvent.setup();
   const { open, save, reopen } = await editor(t, { provider: BASE_PROVIDER });

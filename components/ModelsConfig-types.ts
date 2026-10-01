@@ -304,3 +304,15 @@ export function providerInitials(id: string): string {
     .join("")
     .toUpperCase() || "?";
 }
+
+// ── Model label ──────────────────────────────────────────────────────────────
+
+/** omp's display name, falling back to the id — the label every model surface
+ *  shows. A display name is not an identifier: two models of one provider may
+ *  share it, so only `provider/id` identifies a model. */
+export const modelLabel = (name: string | undefined, id: string): string => name || id;
+
+/** The id to show next to that label, or null when it would only repeat it —
+ *  omp ships `name === id` for custom providers. */
+export const modelIdSuffix = (name: string | undefined, id: string): string | null =>
+  name && name !== id ? id : null;
