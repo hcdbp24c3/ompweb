@@ -55,6 +55,21 @@ ompweb --password "your-password"          # 启用密码保护
 ompweb --no-open                           # 不自动打开浏览器
 ```
 
+## Docker
+
+预构建镜像每次推送到 `main` 时发布到 GHCR（`v*` 标签时同样发布），包含真实
+的 `omp` 二进制文件，并从**本仓库源码**构建。
+
+```bash
+docker run -d --name ompweb -p 30177:30177 \
+  -v omp-data:/root/.omp \
+  ghcr.io/hcdbp24c3/ompweb:latest
+```
+
+`/root/.omp` 存放 omp 的会话、凭据与 `models.yml`，挂载卷即可跨重启保留会话。
+支持 `linux/amd64` 与 `linux/arm64`。完整说明（密码保护、挂载项目目录、固定
+omp 版本）见 [English README](./README.md#docker)。
+
 ## 功能特性
 
 - **实时对话**：与本地 `omp` 智能体进行低延迟流式交互。

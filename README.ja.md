@@ -55,6 +55,22 @@ ompweb --password "your-password"          # パスワード認証を有効化
 ompweb --no-open                           # ブラウザ自動起動を無効化
 ```
 
+## Docker
+
+ビルド済みイメージは `main` への push ごとに GHCR へ公開され（`v*` タグでも）、
+実際の `omp` バイナリを含み、**このリポジトリのソース**からビルドされます。
+
+```bash
+docker run -d --name ompweb -p 30177:30177 \
+  -v omp-data:/root/.omp \
+  ghcr.io/hcdbp24c3/ompweb:latest
+```
+
+`/root/.omp` に omp のセッション・資格情報・`models.yml` が保存されるため、
+ボリュームをマウントすると再起動後もセッションが残ります。`linux/amd64` と
+`linux/arm64` に対応しています。詳細（パスワード保護、ホストのプロジェクトを
+マウント、omp バージョン固定）は [English README](./README.md#docker) を参照。
+
 ## 主な機能
 
 - **リアルタイムチャット**: ローカルの `omp` エージェントとストリーミング対話。

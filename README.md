@@ -7,6 +7,9 @@
 [![GitHub stars](https://img.shields.io/github/stars/kahme247/ompweb.svg?logo=github)](https://github.com/kahme247/ompweb/stargazers)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/kahme247/ompweb/pulls)
 
+[![Docker build](https://github.com/hcdbp24c3/ompweb/actions/workflows/docker.yml/badge.svg)](https://github.com/hcdbp24c3/ompweb/actions/workflows/docker.yml)
+[![ghcr.io/hcdbp24c3/ompweb](https://img.shields.io/badge/image-ghcr.io%2Fhcdbp24c3%2Fompweb-5b8bb7?logo=docker)](https://github.com/hcdbp24c3/ompweb/pkgs/container/ompweb)
+
 [English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md)
 
 Community: [Join the OMPWEB Discord](https://discord.gg/evqgGzRfM5)
@@ -190,6 +193,69 @@ access.
 "Start with Plasma" in the tray menu toggles a desktop autostart entry at
 `~/.config/autostart/ompweb-tray.desktop`. Requires a running StatusNotifierItem
 host (KDE Plasma, and most Wayland/X11 desktops).
+
+## Docker
+
+A prebuilt image is published to GHCR on every push to `main` and on `v*` tags.
+It is built from **this repository's source**, so the image matches the commit it
+was built from, and it bundles a real `omp` binary — every live-agent feature
+needs one.
+
+| Tag | Points at |
+| --- | --- |
+| `latest` | Most recent successful `main` build |
+| `main` | Same as `latest` |
+| `sha-<short>` | The exact commit that was built |
+| `v*`, `<major>.<minor>` | Release tags, if you cut them |
+
+Multi-arch: `linux/amd64` and `linux/arm64` in one manifest.
+
+```bash
+docker run -d \
+  --name ompweb \
+  -p 30177:30177 \
+  -v omp-data:/root/.omp \
+  ghcr.io/hcdbp24c3/ompweb:latest
+```
+
+Then open <http://localhost:30177>.
+
+`/root/.omp` is where omp keeps agent state, sessions, credentials and
+`models.yml`, so mount a volume there to keep sessions across restarts.
+
+### Optional: password protection
+
+```bash
+docker run -d --name ompweb -p 30177:30177 \
+  -e OMP_WEB_PASSWORD='your-password' \
+  -v omp-data:/root/.omp \
+  ghcr.io/hcdbp24c3/ompweb:latest
+```
+
+### Optional: work on a host project
+
+The agent runs in the container, so mount what you want it to touch and point
+the working directory at it:
+
+```bash
+docker run -d --name ompweb -p 30177:30177 \
+  -v omp-data:/root/.omp \
+  -v /path/to/your/project:/workspace \
+  -w /workspace \
+  ghcr.io/hcdbp24c3/ompweb:latest
+```
+
+### Pin the omp version
+
+The image installs the newest `omp` release by default. To pin it, set the
+`OMP_VERSION` build arg (repo variable) or build locally:
+
+```bash
+docker build --build-arg OMP_VERSION=18.4.6 -t ompweb .
+docker run -p 30177:30177 -v omp-data:/root/.omp ompweb
+```
+
+> The build needs network access: it compiles the app and fetches web fonts.
 
 ## Features
 

@@ -16,25 +16,40 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # One native runner per architecture: `ubuntu-24.04-arm` runs arm64 for real, so
+  # the ~30s Next build costs the same as amd64. Emulating it under QEMU instead
+  # took 23 minutes for the same result.
+  #
+  # Each job pushes under its own temporary per-arch tag rather than using
+  # `push-by-digest`. build-push-action forwards every `tags:` entry to buildx as
+  # `--tag` unconditionally (src/context.ts), and buildx then refuses the tagged
+  # ref ("can't push tagged ref ... by digest"); dropping `tags` fails the other
+  # way ("tag is needed when pushing to registry"). A temp tag sidesteps the
+  # conflict: buildx always has the tag it needs, and `imagetools create` reads
+  # the two tags back to assemble the multi-arch manifest.
+  #
+  # The temp tags are deliberately left in place. `imagetools create` copies the
+  # per-arch manifests into the new index, and those manifests are the same
+  # digests — deleting them would leave the index pointing at nothing.
   build:
-    runs-on: ubuntu-latest
+    name: build ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
 
     steps:
       - uses: actions/checkout@v4
-
-      # arm64 is emulated, not native. The per-arch + digest hand-off that avoids
-      # this (`push-by-digest` per matrix job, then a manifest merge) does not work
-      # with build-push-action: it forwards every `tags:` entry to buildx as
-      # `--tag` unconditionally, so a tagged ref is rejected ("can't push tagged
-      # ref ... by digest") while omitting tags fails differently ("tag is needed
-      # when pushing to registry"). Emulating one ~30s Next build costs a few
-      # minutes here and keeps the workflow to a single job with no digest
-      # bookkeeping to go wrong.
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -46,7 +61,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Derive tags and labels
+      - name: Derive labels
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -59,25 +74,71 @@ jobs:
             type=sha,format=short
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
-      - name: Build and push
+      - name: Build and push ${{ matrix.arch }}
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           # A PR from a fork has a read-only GITHUB_TOKEN, so it builds but does
-          # not publish.
+          # not publish — and `merge` is gated on push-only for the same reason.
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          # Per-arch scratch tag. Not a user-facing tag: `merge` folds it into the
+          # real ones, and it stays only so the index has something to point at.
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}-${{ matrix.arch }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             OMP_VERSION=${{ vars.OMP_VERSION || 'latest' }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+
+  # Assemble one multi-arch manifest from the two per-arch tags.
+  merge:
+    name: push multi-arch manifest
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Create and push manifest
+        run: |
+          # The tag list is newline-separated; turn it into `--tag X --tag Y` flags.
+          # shellcheck disable=SC2046
+          set -- ${{ steps.meta.outputs.tags }}
+          flags=""
+          for tag in "$@"; do
+            flags="${flags} --tag ${tag}"
+          done
+          base="${REGISTRY}/${IMAGE_NAME}:build-${GITHUB_SHA}-"
+          # shellcheck disable=SC2086
+          docker buildx imagetools create ${flags} "${base}amd64" "${base}arm64"
 
       - name: Inspect the published manifest
-        if: github.event_name != 'pull_request'
         run: |
-          echo "### Published: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`" >> "$GITHUB_STEP_SUMMARY"
-          docker buildx imagetools inspect \
-            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" \
+          echo "### Published: \`${REGISTRY}/${IMAGE_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
+          docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:latest" \
             | tee -a "$GITHUB_STEP_SUMMARY"
