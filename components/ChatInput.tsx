@@ -1510,6 +1510,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         ?? model.modelId)
     : null;
   const currentName = displayModelName;
+  // A display name is not an identifier, so the trigger's accessible name and
+  // tooltip carry the full provider/id selector — it is the only place the
+  // exact selector is readable (and copyable) without opening the picker.
+  const currentSelector = model ? `${model.provider}/${model.modelId}` : null;
+  const currentLabel = currentName && currentSelector ? `${currentName} (${currentSelector})` : currentName;
   // A failed load surfaces modelError; only an in-flight load shows the
   // loading chip, so "no models" can only appear after the fetch settled.
   const showModelsLoading = Boolean(modelsLoading) && !modelError;
@@ -2675,7 +2680,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   ref={modelTriggerRef}
                   onClick={() => setModelDropdownOpen((v) => !v)}
                   disabled={modelSelectorDisabled}
-                  aria-label={`${t("chatInput.changeModel")}: ${currentName ?? (modelOptions.length > 0
+                  aria-label={`${t("chatInput.changeModel")}: ${currentLabel ?? (modelOptions.length > 0
                     ? t("chatInput.selectModel")
                     : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noModels"))}`}
                   style={{
@@ -2703,9 +2708,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     e.currentTarget.style.background = modelDropdownOpen ? "var(--bg-hover)" : "none";
                     e.currentTarget.style.color = "var(--text-muted)";
                   }}
-                  title={modelOptions.length > 0
-                    ? t("chatInput.changeModel")
-                    : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noAvailableModels")}
+                  title={currentLabel
+                    ? `${t("chatInput.changeModel")}: ${currentLabel}`
+                    : modelOptions.length > 0
+                      ? t("chatInput.changeModel")
+                      : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noAvailableModels")}
                   aria-expanded={modelDropdownOpen}
                   aria-haspopup="dialog"
                   aria-controls={modelPickerId}

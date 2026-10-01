@@ -128,10 +128,11 @@ export function ModelPickerPanel({
     onSelectModel(opt.provider, opt.modelId);
   };
 
-  const renderModelRow = (opt: ModelOption, opts?: { showProvider?: boolean }) => {
+  const renderModelRow = (opt: ModelOption) => {
     const isActive = Boolean(currentModel)
       && opt.modelId === currentModel?.modelId
       && opt.provider === currentModel?.provider;
+    const label = opt.name || opt.modelId;
     return (
       <button
         className="picker-row"
@@ -140,15 +141,17 @@ export function ModelPickerPanel({
         key={`${opt.provider}:${opt.modelId}`}
         role="menuitemradio"
         aria-checked={isActive}
+        title={`${opt.provider}/${opt.modelId}`}
         onClick={() => selectModel(opt)}
       >
         <span className="picker-check">{isActive && <Check size={11} strokeWidth={2.4} aria-hidden="true" />}</span>
         <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {opt.name || opt.modelId}
+          {label}
         </span>
-        {opts?.showProvider && (
-          <span className="picker-row-meta">{opt.provider}</span>
-        )}
+        {/* A name is not an identifier — omp lets two models of one provider
+            share it — so the id has to stay visible. omp also ships `name === id`
+            for custom providers, which would print it twice. */}
+        {label !== opt.modelId && <code className="picker-row-meta">{opt.modelId}</code>}
       </button>
     );
   };
