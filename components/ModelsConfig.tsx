@@ -34,7 +34,7 @@ import {
   THINKING_MODES,
   TOKENIZER_OPTIONS,
   authRows,
-  authUsesApiKey,
+  authIsKeyless,
   discoveredToModelEntry,
   modelIdSuffix,
   modelLabel,
@@ -529,19 +529,18 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete, onAddMod
   const baseUrlV = useFieldValidation(baseUrlValidate);
 
   const apiKeyValidate = () => {
-    if (!authUsesApiKey(provider.auth)) return null;
+    if (authIsKeyless(provider.auth)) return null;
     if (!provider.apiKey || !provider.apiKey.trim()) return t("modelsConfig.errorApiKeyRequired");
     return null;
   };
   const apiKeyV = useFieldValidation(apiKeyValidate);
 
-  /** `auth` names where the credential comes from, so a mode omp resolves itself
-   *  (`none`, `oauth`) leaves nothing for `apiKey` to hold — drop it rather than
-   *  keep a secret in models.yml that the editor can no longer show or explain.
-   *  Applied by the writers that *change* the mode, so a hand-written
-   *  `auth: oauth` that also carries a key keeps that key. */
+  /** `auth: none` tells omp to send no credential at all, so a key left in
+   *  models.yml is dead weight the editor can no longer show — drop it, the one
+   *  mode where nothing is lost. `oauth` is *not* such a mode: omp still feeds
+   *  `providerApiKey` to the Bearer header resolver, so the key is kept. */
   const withoutDeadApiKey = (auth: ProviderEntry["auth"]): Pick<ProviderEntry, "apiKey"> =>
-    auth !== undefined && !authUsesApiKey(auth) ? { apiKey: undefined } : {};
+    auth !== undefined && authIsKeyless(auth) ? { apiKey: undefined } : {};
 
   /** The rows come from `authRows`, so `raw` can be a mode this editor has no
    *  name for; it is written back verbatim rather than narrowed away. */
@@ -685,10 +684,10 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete, onAddMod
           />
         </FormField>
 
-        {/* The key field belongs to the apiKey mode: `none` and `oauth` name a
-            credential omp already holds, so an empty box here would only invite
-            a value that is never sent. */}
-        {authUsesApiKey(provider.auth) && (
+        {/* Only `auth: none` hides the key: omp sends no credential for it.
+            `auth: oauth` shapes the request OAuth-style but still authenticates
+            with `apiKey`, so the field stays — see authIsKeyless. */}
+        {!authIsKeyless(provider.auth) && (
           <FormField
             label={t("modelsConfig.apiKey")}
             hint={<CodeText text={t("modelsConfig.apiKeyHint")} />}

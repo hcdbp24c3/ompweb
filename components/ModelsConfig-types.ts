@@ -87,12 +87,20 @@ export const isAuthMode = (value: string): value is AuthMode =>
 export const authRows = (declared: string | undefined): string[] =>
   declared && !isAuthMode(declared) ? [...AUTH_MODES, declared] : [...AUTH_MODES];
 
-/** True when `auth` still means "send the apiKey from this provider" — unset is
- *  omp's apiKey default. `none` and `oauth` name a credential omp already holds,
- *  so models.yml has no key to offer; an unrecognised mode keeps the key field
- *  rather than hiding a key the file declares. */
-export const authUsesApiKey = (auth: string | undefined): boolean =>
-  auth === undefined || auth === "" || auth === "apiKey";
+/** True when `auth` leaves `apiKey` to mean nothing at all — i.e. models.yml has
+ *  no key to show and omp will not send one. That is only `auth: none`, which
+ *  omp records in `keylessProviders` (model-registry.ts:1602-1604); unset is
+ *  omp's `apiKey` default.
+ *
+ *  Deliberately NOT true for `oauth`: `auth: oauth` only forces OAuth-style
+ *  request shaping (`resolveCustomModelIsOAuth` in custom-models.ts:57-62), and
+ *  omp still feeds `providerApiKey` into the Bearer header resolver
+ *  (`mergeCustomModelHeaders(…, authHeader, providerApiKey)` at :100). A
+ *  Claude-Code-style proxy behind `auth: oauth` legitimately carries both, so
+ *  hiding or clearing the key there would delete a value omp still reads. An
+ *  unrecognised mode is treated the same way: never destroy what we cannot
+ *  explain. */
+export const authIsKeyless = (auth: string | undefined): boolean => auth === "none";
 
 /** Lets omp ask the server for the model list instead of the user writing it
  * out. `injectV1` only applies to `openai-models-list` (omp's schema rejects

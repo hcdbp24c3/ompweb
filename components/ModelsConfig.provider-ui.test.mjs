@@ -439,16 +439,51 @@ test("leaving apiKey auth clears the key, and authHeader goes with it", async (t
   assert.equal(keyed.apiKey, "sk-live");
   assert.equal(keyed.authHeader, true);
 
-  await user.selectOptions(screen.getByLabelText("Authentication"), "oauth");
+  await user.selectOptions(screen.getByLabelText("Authentication"), "none");
   const written = await save();
-  assert.equal(written.auth, "oauth");
-  assert.equal(written.apiKey, undefined, "a key this provider can no longer send must not linger in the file");
+  assert.equal(written.auth, "none");
+  assert.equal(written.apiKey, undefined, "`auth: none` makes omp send no credential, so the key is dead weight");
   assert.equal(written.authHeader, undefined, "and the header flag that only existed for it");
   assert.equal(
     screen.queryByLabelText(/API Key/),
     null,
-    "an empty key field under oauth would only invite a value omp ignores",
+    "a key field under `none` would only invite a value omp ignores",
   );
+});
+
+test("auth: oauth keeps the key, because omp still authenticates with it", async (t) => {
+  const user = userEvent.setup();
+  const { open, save } = await editor(t, { provider: { baseUrl: BASE_PROVIDER.baseUrl, api: BASE_PROVIDER.api } });
+  await open();
+
+  await user.type(screen.getByLabelText(/API Key/), "sk-live");
+  await user.selectOptions(screen.getByLabelText("Authentication"), "oauth");
+  const written = await save();
+  assert.equal(written.auth, "oauth");
+  // `auth: oauth` only forces OAuth-style request shaping; omp still feeds
+  // providerApiKey to the Bearer header resolver, so clearing it here would
+  // delete a credential the endpoint still needs.
+  assert.equal(written.apiKey, "sk-live", "the key survives a move to oauth");
+  assert.notEqual(
+    screen.queryByLabelText(/API Key/),
+    null,
+    "and the field stays reachable so the value is never invisible in the file",
+  );
+});
+
+test("an auth mode the editor has no name for is listed and left alone", async (t) => {
+  const user = userEvent.setup();
+  const { open, save } = await editor(t, { provider: { ...BASE_PROVIDER, auth: "bearer", apiKey: "sk-live" } });
+  await open();
+
+  const select = screen.getByLabelText("Authentication");
+  assert.equal(select.value, "bearer", "the file's own mode has to be selectable or the next save would drop it");
+  const kept = await save();
+  assert.equal(kept.auth, "bearer", "and untouched it round-trips");
+  assert.equal(kept.apiKey, "sk-live", "a mode we cannot explain must never cost the user their key");
+
+  await user.selectOptions(select, "none");
+  assert.equal((await save()).auth, "none", "the user can still move off an unknown mode deliberately");
 });
 
 test("an endpoint preset that turns auth off drops the key with it", async (t) => {
@@ -465,19 +500,6 @@ test("an endpoint preset that turns auth off drops the key with it", async (t) =
     undefined,
     "the preset hid the key field; a key left behind in the file would be invisible from here on",
   );
-});
-
-test("an auth mode the editor has no name for is listed and left alone", async (t) => {
-  const user = userEvent.setup();
-  const { open, save } = await editor(t, { provider: { ...BASE_PROVIDER, auth: "bearer" } });
-  await open();
-
-  const select = screen.getByLabelText("Authentication");
-  assert.equal(select.value, "bearer", "the file's own mode has to be selectable or the next save would drop it");
-  assert.equal((await save()).auth, "bearer", "and untouched it round-trips");
-
-  await user.selectOptions(select, "none");
-  assert.equal((await save()).auth, "none", "the user can still move off an unknown mode deliberately");
 });
 
 test("discoveredToModelEntry drops the nulls the endpoint can return", () => {
