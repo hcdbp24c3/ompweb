@@ -20,7 +20,7 @@ import {
   ConfirmDialog,
   useFieldValidation,
 } from "@/components/ui/field";
-import { Plus, Trash2, RefreshCw, AlertCircle, Cpu, Settings, Sparkles, Check as CheckIcon, Layers, RotateCcw, SlidersHorizontal, BookOpen, Search, KeyRound, ArrowLeft } from "lucide-react";
+import { Plus, Trash2, RefreshCw, AlertCircle, Cpu, Settings, Sparkles, Check as CheckIcon, Layers, RotateCcw, SlidersHorizontal, BookOpen, Search, KeyRound, ArrowLeft, Radar } from "lucide-react";
 import { toast } from "@/components/ui/toast";
 import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
 import { ModelCatalogPicker } from "./ModelCatalogPicker";
@@ -28,16 +28,21 @@ import {
   API_OPTIONS,
   COMPOSER_MODELS_STORAGE_KEY,
   COST_LABEL_KEYS,
+  DISCOVERY_TYPES,
   ENDPOINT_PRESETS,
   LEVEL_COLORS,
   THINKING_LEVELS,
+  discoveredToModelEntry,
   presetButtonStyle,
+  type DiscoveredModel,
+  type DiscoveryType,
   type EndpointPreset,
   type ModelEntry,
   type ModelTestState,
   type ModelsFileData,
   type OAuthLoginState,
   type OAuthProvider,
+  type ProviderDiscovery,
   type ApiKeyProvider,
   type ProviderEntry,
   type ConnectedProvider,
@@ -72,9 +77,364 @@ export { providerInitials } from "./ModelsConfig-types";
 // ── Provider detail ───────────────────────────────────────────────────────────
 
 
-function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
+type DiscoverState =
+  | { phase: "idle" }
+  | { phase: "running" }
+  | { phase: "error"; message: string }
+  | { phase: "found"; models: DiscoveredModel[]; selected: Set<string> };
+
+/** Provider-level model discovery (omp's `discovery` block) plus the Discover
+ *  button that resolves the list through `/api/models-config/discover`.
+ *
+ *  The sub-controls are only reachable once a type exists because omp validates
+ *  them against the type: `injectV1` is schema-rejected outside
+ *  `openai-models-list`, so switching types must drop it rather than leave an
+ *  entry the server will refuse. */
+function ProviderDiscoveryEditor({ name, provider, onChange, onAddModels }: {
+  name: string; provider: ProviderEntry; onChange: (p: ProviderEntry) => void;
+  onAddModels: (models: ModelEntry[]) => void;
+}) {
+  const { t, tn } = useI18n();
+  const [discover, setDiscover] = useState<DiscoverState>({ phase: "idle" });
+  const [timeoutDraft, setTimeoutDraft] = useState<string | null>(null);
+  const discovery = provider.discovery;
+  const type = discovery?.type;
+  // omp defaults injectV1 to true, so an unset block shows an enabled box and
+  // only writes the key once the user actually touches it.
+  const injectV1 = discovery?.injectV1 ?? true;
+
+  const setDiscovery = (next: ProviderDiscovery | undefined) => onChange({ ...provider, discovery: next });
+
+  // A result set was fetched from whatever the endpoint looked like a moment
+  // ago; keeping it after the connection details move would let the user append
+  // another server's models. Same reset rule the model detail uses for its
+  // connectivity test.
+  useEffect(() => {
+    setDiscover({ phase: "idle" });
+  }, [name, provider.baseUrl, provider.api, provider.apiKey]);
+
+  /** Single place the `discovery` block is built, and therefore the single
+   *  place omp's cross-field rules are enforced: `injectV1` is schema-rejected
+   *  outside `openai-models-list`, so it is dropped on every path that changes
+   *  the type instead of leaving a file the server will refuse. */
+  const buildDiscovery = (next: DiscoveryType, patch?: { timeoutMs?: number; injectV1?: boolean }): ProviderDiscovery => {
+    const block: ProviderDiscovery = { type: next };
+    if (patch?.timeoutMs !== undefined) block.timeoutMs = patch.timeoutMs;
+    if (next === "openai-models-list" && patch?.injectV1 !== undefined) block.injectV1 = patch.injectV1;
+    return block;
+  };
+
+  const selectType = (raw: string) => {
+    if (!raw) {
+      setTimeoutDraft(null);
+      setDiscovery(undefined);
+      return;
+    }
+    const next = raw as DiscoveryType;
+    setTimeoutDraft(null);
+    setDiscovery(buildDiscovery(next, { timeoutMs: discovery?.timeoutMs, injectV1: discovery?.injectV1 }));
+  };
+
+  const timeoutValue = timeoutDraft ?? (discovery?.timeoutMs !== undefined ? String(discovery.timeoutMs) : "");
+  const timeoutValidate = () => {
+    const raw = timeoutValue.trim();
+    if (!raw) return null;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0) return t("modelsConfig.discoveryTimeoutInvalid");
+    return null;
+  };
+  const timeoutV = useFieldValidation(timeoutValidate);
+  const setTimeout = (raw: string) => {
+    setTimeoutDraft(raw);
+    timeoutV.onChange();
+    if (!type) return;
+    const parsed = Number(raw.trim());
+    if (!raw.trim()) {
+      setDiscovery(buildDiscovery(type, { injectV1: discovery?.injectV1 }));
+      return;
+    }
+    // An invalid entry is reported inline and left out of models.yml rather
+    // than written and bounced by the server on save.
+    if (Number.isFinite(parsed) && parsed > 0) {
+      setDiscovery(buildDiscovery(type, { timeoutMs: parsed, injectV1: discovery?.injectV1 }));
+    }
+  };
+
+  const run = useCallback(async () => {
+    setDiscover({ phase: "running" });
+    try {
+      const res = await fetch("/api/models-config/discover", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ providerName: name, provider }),
+      });
+      const d = await res.json() as { ok?: boolean; models?: DiscoveredModel[]; error?: string; code?: string };
+      if (!res.ok || !d.ok) {
+        setDiscover({ phase: "error", message: d.error || d.code ? formatApiError(d) : `HTTP ${res.status}` });
+        return;
+      }
+      const models = Array.isArray(d.models) ? d.models : [];
+      setDiscover({ phase: "found", models, selected: new Set(models.map((model) => model.id)) });
+    } catch (e) {
+      setDiscover({ phase: "error", message: e instanceof Error ? e.message : String(e) });
+    }
+  }, [name, provider]);
+
+  const toggle = (id: string) => setDiscover((prev) => {
+    if (prev.phase !== "found") return prev;
+    const selected = new Set(prev.selected);
+    if (selected.has(id)) selected.delete(id); else selected.add(id);
+    return { ...prev, selected };
+  });
+
+  const addSelected = () => {
+    if (discover.phase !== "found") return;
+    const picked = discover.models.filter((model) => discover.selected.has(model.id));
+    if (picked.length === 0) return;
+    onAddModels(picked.map(discoveredToModelEntry));
+    setDiscover({ phase: "idle" });
+  };
+
+  return (
+    <FieldGroup
+      label={
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <Radar size={12} aria-hidden="true" /> {t("modelsConfig.modelDiscovery")}
+        </span>
+      }
+    >
+      <FormField
+        label={t("modelsConfig.discoverySource")}
+        hint={<CodeText text={t("modelsConfig.discoverySourceHint")} />}
+      >
+        <FormSelect
+          value={type ?? ""}
+          onChange={selectType}
+          options={DISCOVERY_TYPES}
+          placeholder={t("modelsConfig.noDiscovery")}
+        />
+      </FormField>
+
+      {type && (
+        <>
+          <FormField
+            label={t("modelsConfig.discoveryTimeout")}
+            hint={t("modelsConfig.discoveryTimeoutHint")}
+            error={timeoutV.error}
+          >
+            <NumInput
+              value={timeoutValue}
+              onChange={setTimeout}
+              placeholder="5000"
+              invalid={Boolean(timeoutV.error)}
+              error={timeoutV.error}
+              onBlurValidate={timeoutV.onBlur}
+            />
+          </FormField>
+          {type === "openai-models-list" && (
+            <>
+              <FormCheck
+                label={t("modelsConfig.discoveryInjectV1")}
+                checked={injectV1}
+                onChange={(v) => setDiscovery(buildDiscovery(type, { timeoutMs: discovery?.timeoutMs, injectV1: v }))}
+              />
+              <p style={{ margin: 0, fontSize: 10, color: "var(--text-dim)", lineHeight: 1.4 }}>
+                <CodeText text={t("modelsConfig.discoveryInjectV1Hint")} />
+              </p>
+            </>
+          )}
+        </>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            onClick={() => void run()}
+            disabled={discover.phase === "running"}
+            style={{
+              padding: "5px 12px",
+              background: "none",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-control)",
+              color: discover.phase === "running" ? "var(--text-dim)" : "var(--text-muted)",
+              cursor: discover.phase === "running" ? "wait" : "pointer",
+              fontSize: 11,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+            }}
+          >
+            <Radar size={12} aria-hidden="true" />
+            {discover.phase === "running" ? t("modelsConfig.discovering") : t("modelsConfig.discoverModels")}
+          </button>
+          {discover.phase === "found" && discover.selected.size > 0 && (
+            <button
+              type="button"
+              onClick={addSelected}
+              style={{
+                padding: "5px 12px",
+                background: "var(--accent-strong)",
+                border: "none",
+                borderRadius: "var(--radius-control)",
+                color: "var(--on-accent)",
+                cursor: "pointer",
+                fontSize: 11,
+                fontWeight: 600,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 5,
+              }}
+            >
+              <Plus size={12} aria-hidden="true" /> {t("modelsConfig.addSelectedModels")}
+            </button>
+          )}
+        </div>
+
+        <p style={{ margin: 0, fontSize: 10, color: "var(--text-dim)", lineHeight: 1.4 }}>
+          <CodeText text={t("modelsConfig.discoverModelsHint")} />
+        </p>
+
+        {discover.phase === "error" && (
+          <span role="alert" style={{ fontSize: 11, color: "var(--status-error)", lineHeight: 1.4 }}>
+            {discover.message}
+          </span>
+        )}
+        {discover.phase === "found" && (
+          discover.models.length === 0 ? (
+            <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("modelsConfig.discoverNoModels")}</span>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <span style={{ fontSize: 10, color: "var(--text-dim)" }}>
+                {tn("modelsConfig.modelsFound", discover.models.length)}
+              </span>
+              {discover.models.map((model) => (
+                <label
+                  key={model.id}
+                  style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--text)", cursor: "pointer" }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={discover.selected.has(model.id)}
+                    onChange={() => toggle(model.id)}
+                    aria-label={model.id}
+                    style={{ width: 14, height: 14, accentColor: "var(--accent)", flexShrink: 0 }}
+                  />
+                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{model.name || model.id}</span>
+                  <code style={{ color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)", marginLeft: "auto" }}>{model.id}</code>
+                </label>
+              ))}
+            </div>
+          )
+        )}
+      </div>
+    </FieldGroup>
+  );
+}
+
+/** Key/value editor for the provider's `headers`. Rows are local drafts so a
+ *  half-typed pair (no name yet) never reaches models.yml, and are written back
+ *  as a record — the only shape omp's schema accepts.
+ *
+ *  The rows are not re-seeded from props: this editor is the only writer of
+ *  `headers` while it is mounted (ProviderDetail is keyed by provider name, so
+ *  switching providers remounts it), and re-seeding on every keystroke would
+ *  wipe a half-typed name. */
+function ProviderHeadersEditor({ headers, onChange }: {
+  headers: Record<string, string> | undefined; onChange: (headers: Record<string, string> | undefined) => void;
+}) {
+  const { t } = useI18n();
+  const [rows, setRows] = useState<Array<{ key: string; value: string }>>(() => Object.entries(headers ?? {}).map(([key, value]) => ({ key, value })));
+
+  const commit = (next: Array<{ key: string; value: string }>) => {
+    setRows(next);
+    const record: Record<string, string> = {};
+    for (const row of next) {
+      const key = row.key.trim();
+      if (key) record[key] = row.value;
+    }
+    onChange(Object.keys(record).length > 0 ? record : undefined);
+  };
+
+  const update = (index: number, patch: Partial<{ key: string; value: string }>) => {
+    commit(rows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+  };
+
+  return (
+    <FieldGroup
+      label={
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <SlidersHorizontal size={12} aria-hidden="true" /> {t("modelsConfig.requestHeaders")}
+        </span>
+      }
+    >
+      <p style={{ margin: 0, fontSize: 10, color: "var(--text-dim)", lineHeight: 1.4 }}>
+        <CodeText text={t("modelsConfig.requestHeadersHint")} />
+      </p>
+      {rows.map((row, index) => {
+        const removeLabel = t("modelsConfig.removeHeader", {
+          name: row.key.trim() || t("modelsConfig.headerName", { n: index + 1 }),
+        });
+        return (
+        <div key={index} style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8, alignItems: "end" }}>
+          <FormField label={t("modelsConfig.headerName", { n: index + 1 })}>
+            <TextInput value={row.key} onChange={(v) => update(index, { key: v })} placeholder="X-Team" mono />
+          </FormField>
+          <FormField label={t("modelsConfig.headerValue", { n: index + 1 })}>
+            <TextInput value={row.value} onChange={(v) => update(index, { value: v })} placeholder="platform" mono />
+          </FormField>
+          <button
+            type="button"
+            onClick={() => commit(rows.filter((_, i) => i !== index))}
+            aria-label={removeLabel}
+            title={removeLabel}
+            className="ui-focus-ring"
+            style={{
+              width: 28,
+              height: 28,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "none",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-control)",
+              color: "var(--text-dim)",
+              cursor: "pointer",
+              flexShrink: 0,
+            }}
+          >
+            <Trash2 size={12} aria-hidden="true" />
+          </button>
+        </div>
+        );
+      })}
+      <button
+        type="button"
+        onClick={() => setRows([...rows, { key: "", value: "" }])}
+        style={{
+          alignSelf: "flex-start",
+          padding: "4px 10px",
+          background: "none",
+          border: "1px solid var(--border)",
+          borderRadius: "var(--radius-control)",
+          color: "var(--text-muted)",
+          cursor: "pointer",
+          fontSize: 11,
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 5,
+        }}
+      >
+        <Plus size={12} aria-hidden="true" /> {t("modelsConfig.addHeader")}
+      </button>
+    </FieldGroup>
+  );
+}
+
+function ProviderDetail({ name, provider, onChange, onRename, onDelete, onAddModels }: {
   name: string; provider: ProviderEntry;
   onChange: (p: ProviderEntry) => void; onRename: (n: string) => void; onDelete: () => void;
+  onAddModels: (models: ModelEntry[]) => void;
 }) {
   const { t } = useI18n();
   const [editingName, setEditingName] = useState(name);
@@ -84,6 +444,21 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
 
   useEffect(() => {
     if (!provider.api) onChange({ ...provider, api: "openai-completions" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider.api]);
+
+  // omp's `authHeader` and `disableStrictTools` only mean something alongside
+  // an apiKey / the anthropic-messages api. The controls are hidden otherwise
+  // and the flag is cleared when its precondition goes away, so the saved file
+  // never carries a setting the UI can no longer explain.
+  useEffect(() => {
+    if (!provider.apiKey && provider.authHeader) onChange({ ...provider, authHeader: undefined });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider.apiKey]);
+  useEffect(() => {
+    if (provider.api !== "anthropic-messages" && provider.disableStrictTools) {
+      onChange({ ...provider, disableStrictTools: undefined });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider.api]);
 
@@ -257,6 +632,14 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
           }}
         />
 
+        {provider.apiKey && (
+          <FormCheck
+            label={t("modelsConfig.authHeader")}
+            checked={provider.authHeader ?? false}
+            onChange={(v) => set("authHeader", v || undefined)}
+          />
+        )}
+
         <FormField label={t("modelsConfig.api")}>
           <FormSelect
             value={provider.api ?? "openai-completions"}
@@ -266,7 +649,27 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
             placeholder={t("modelsConfig.inheritNone")}
           />
         </FormField>
+
+        {provider.api === "anthropic-messages" && (
+          <FormCheck
+            label={t("modelsConfig.disableStrictTools")}
+            checked={provider.disableStrictTools ?? false}
+            onChange={(v) => set("disableStrictTools", v || undefined)}
+          />
+        )}
       </FieldGroup>
+
+      <ProviderDiscoveryEditor
+        name={name}
+        provider={provider}
+        onChange={onChange}
+        onAddModels={onAddModels}
+      />
+
+      <ProviderHeadersEditor
+        headers={provider.headers}
+        onChange={(headers) => set("headers", headers)}
+      />
 
       {/* Danger Zone */}
       <section style={{ padding: "14px 16px", border: "1px solid color-mix(in srgb, var(--status-error) 25%, transparent)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
@@ -1263,6 +1666,22 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
     setCatalogPicker(null);
   }, []);
 
+  /** Appends a batch of discovered models and opens the FIRST new entry, not
+   *  the last — the user's eye starts at the top of the list they just added.
+   *  The index comes from the rendered `config` rather than from inside the
+   *  state updater, which does not run until the next render. */
+  const addDiscoveredModels = useCallback((providerName: string, models: ModelEntry[]) => {
+    if (models.length === 0) return;
+    setConfig((prev) => {
+      const provider = prev.providers?.[providerName] ?? {};
+      return {
+        ...prev,
+        providers: { ...(prev.providers ?? {}), [providerName]: { ...provider, models: [...(provider.models ?? []), ...models] } },
+      };
+    });
+    setSelection({ type: "model", providerName, index: config.providers?.[providerName]?.models?.length ?? 0 });
+  }, [config.providers]);
+
   const updateModel = useCallback((providerName: string, index: number, m: ModelEntry) => {
     setConfig((prev) => {
       const provider = prev.providers?.[providerName] ?? {};
@@ -1431,6 +1850,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
           onChange={(p) => updateProvider(selection.name, p)}
           onRename={(n) => renameProvider(selection.name, n)}
           onDelete={() => deleteProvider(selection.name)}
+          onAddModels={(models) => addDiscoveredModels(selection.name, models)}
         />
       );
     }

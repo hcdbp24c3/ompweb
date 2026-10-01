@@ -118,6 +118,35 @@ export interface ModelsFileData {
   providers?: Record<string, ProviderEntry>;
 }
 
+/** One row of `/api/models-config/discover`'s response. `contextWindow` /
+ *  `maxTokens` are `null` when the server does not report them, which is not
+ *  the same as a models.yml entry — see `discoveredToModelEntry`. */
+export interface DiscoveredModel {
+  id: string;
+  name?: string;
+  reasoning?: boolean;
+  thinking?: ThinkingConfig;
+  input?: string[];
+  contextWindow?: number | null;
+  maxTokens?: number | null;
+  cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+}
+
+/** Prefills a models.yml model entry from a discovered model. `null` becomes
+ *  `undefined` so an unreported limit is omitted instead of written as `null`. */
+export function discoveredToModelEntry(model: DiscoveredModel): ModelEntry {
+  return {
+    id: model.id,
+    name: model.name,
+    reasoning: model.reasoning,
+    thinking: model.thinking,
+    input: model.input,
+    contextWindow: model.contextWindow ?? undefined,
+    maxTokens: model.maxTokens ?? undefined,
+    cost: model.cost,
+  };
+}
+
 export type ModelTestState =
   | { phase: "idle" }
   | { phase: "testing" }
