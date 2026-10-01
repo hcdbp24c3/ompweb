@@ -34,6 +34,8 @@ import {
   THINKING_MODES,
   TOKENIZER_OPTIONS,
   discoveredToModelEntry,
+  modelIdSuffix,
+  modelLabel,
   orderedThinkingEfforts,
   presetButtonStyle,
   thinkingLevelColor,
@@ -323,8 +325,10 @@ function ProviderDiscoveryEditor({ name, provider, onChange, onAddModels }: {
                     aria-label={model.id}
                     style={{ width: 14, height: 14, accentColor: "var(--accent)", flexShrink: 0 }}
                   />
-                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{model.name || model.id}</span>
-                  <code style={{ color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)", marginLeft: "auto" }}>{model.id}</code>
+                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{modelLabel(model.name, model.id)}</span>
+                  {modelIdSuffix(model.name, model.id) && (
+                    <code style={{ color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)", marginLeft: "auto" }}>{model.id}</code>
+                  )}
                 </label>
               ))}
             </div>
@@ -1981,7 +1985,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                 {models.map((model) => (
                   <label key={`${model.provider}:${model.id}`} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", color: "var(--text)", cursor: "pointer", borderTop: "1px solid var(--border)", background: visibleModelKeys !== null && !visibleModelKeys.has(`${model.provider}:${model.id}`) ? "var(--bg)" : "var(--bg-panel)" }}>
                     <input type="checkbox" checked={visibleModelKeys === null || visibleModelKeys.has(`${model.provider}:${model.id}`)} onChange={(event) => setComposerModelVisible(model, event.target.checked)} aria-label={`Show ${model.provider}/${model.id} in composer`} />
-                    <span style={{ minWidth: 0, flex: 1, fontSize: 12, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{model.name || model.id}</span>
+                    <span style={{ minWidth: 0, flex: 1, fontSize: 12, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{modelLabel(model.name, model.id)}</span>
                     <code style={{ color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 220 }}>{model.provider}/{model.id}</code>
                   </label>
                 ))}
@@ -2153,7 +2157,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                                   <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 12 }}>
                                     {models.slice(0, 3).map((m) => (
                                       <span key={m.id} style={{ fontSize: 10.5, padding: "2px 6px", borderRadius: 4, background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
-                                        {m.name || m.id}
+                                        {modelLabel(m.name, m.id)}
                                       </span>
                                     ))}
                                     {models.length > 3 && (
@@ -2216,7 +2220,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                                   <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 12 }}>
                                     {models.slice(0, 3).map((m) => (
                                       <span key={m.id} style={{ fontSize: "var(--text-xs)", padding: "2px 6px", borderRadius: 4, background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
-                                        {m.name || m.id}
+                                        {modelLabel(m.name, m.id)}
                                       </span>
                                     ))}
                                     {models.length > 3 && (

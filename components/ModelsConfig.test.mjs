@@ -15,6 +15,8 @@ const {
   THINKING_LEVELS,
   THINKING_MODES,
   TOKENIZER_OPTIONS,
+  modelIdSuffix,
+  modelLabel,
   orderedThinkingEfforts,
   thinkingLevelColor,
   thinkingRows,
@@ -25,6 +27,34 @@ test("provider glyphs derive from arbitrary runtime provider ids", () => {
   assert.equal(providerInitials("my_custom_gateway"), "MC");
   assert.equal(providerInitials("provider"), "P");
   assert.equal(providerInitials(""), "?");
+});
+
+// ── Shared model label ───────────────────────────────────────────────────────
+// `name` is a display label, not an identifier: omp lets two models of one
+// provider share it, and custom providers ship `name === id`. Every model
+// surface spelled the fallback and the "is the id worth showing again?" test out
+// for itself, so the two answers could drift apart.
+
+test("modelLabel falls back to the id when omp ships no display name", () => {
+  assert.equal(modelLabel(undefined, "gpt-5.6-sol"), "gpt-5.6-sol");
+  assert.equal(modelLabel("Codex Tier", "gpt-5.6-sol"), "Codex Tier");
+});
+
+test("modelIdSuffix drops the id when it would only repeat the label", () => {
+  assert.equal(modelIdSuffix("my-model", "my-model"), null);
+  assert.equal(modelIdSuffix(undefined, "my-model"), null);
+  assert.equal(modelIdSuffix("Codex Tier", "gpt-5.6-sol"), "gpt-5.6-sol");
+});
+
+/** A label and an id suffix are one decision, so they have to come from one
+ *  place. `ChatInput-model-options.ts` is excluded on purpose: its `name || id`
+ *  is a sort key, not a label, and sorting must stay name-first. */
+test("no model surface spells the name-or-id label out inline", () => {
+  const inline = /\.name\s*\|\|\s*[A-Za-z_$][\w$]*\.(?:id|modelId)\b/;
+  for (const file of ["ModelsConfig.tsx", "ModelsConfig-panels.tsx", "ChatInput-model-picker.tsx"]) {
+    const source = readFileSync(new URL(`./${file}`, import.meta.url), "utf8");
+    assert.doesNotMatch(source, inline, `${file} still builds its own model label`);
+  }
 });
 
 // The option lists are copied from omp's schema, not from its docs: the docs

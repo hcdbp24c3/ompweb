@@ -11,6 +11,7 @@ import { Plus, Trash2, ArrowDown, ArrowUp } from "lucide-react";
 import { toast } from "@/components/ui/toast";
 import {
   NATIVE_MODEL_ROLES,
+  modelLabel,
   providerInitials,
   type ApiKeyProvider,
   type ConnectedProvider,
@@ -310,7 +311,7 @@ export function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
             <select aria-label={`Model override for ${role}`} value={selectedModel} onChange={(event) => updateRoleModel(role, event.target.value)} style={{ minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12 }}>
               <option value="">{t("modelsConfig.noOverride")}</option>
               {!modelKnown && <option value={selectedModel}>{selectedModel} (not currently available)</option>}
-              {models.map((item) => <option key={`${item.provider}:${item.id}`} value={`${item.provider}/${item.id}`}>{item.name || item.id} ({item.provider}/{item.id})</option>)}
+              {models.map((item) => <option key={`${item.provider}:${item.id}`} value={`${item.provider}/${item.id}`}>{modelLabel(item.name, item.id)} ({item.provider}/{item.id})</option>)}
             </select>
             <select aria-label={`Thinking level for ${role}`} value={selectedThinking} disabled={!model} onChange={(event) => updateRoleThinking(role, event.target.value)} style={{ minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12, opacity: model ? 1 : 0.55 }}>
               <option value="">{t("modelsConfig.modelDefault")}</option>

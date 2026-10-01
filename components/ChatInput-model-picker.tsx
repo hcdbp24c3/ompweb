@@ -3,7 +3,7 @@
 import React, { useMemo, useState } from "react";
 import { Check, ChevronLeft, ChevronRight, Plus, Search } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
-import { providerInitials } from "./ModelsConfig-types";
+import { modelIdSuffix, modelLabel, providerInitials } from "./ModelsConfig-types";
 import type { ModelOption } from "./ChatInput-model-options";
 
 export interface ProviderModelGroup {
@@ -132,7 +132,8 @@ export function ModelPickerPanel({
     const isActive = Boolean(currentModel)
       && opt.modelId === currentModel?.modelId
       && opt.provider === currentModel?.provider;
-    const label = opt.name || opt.modelId;
+    const label = modelLabel(opt.name, opt.modelId);
+    const idSuffix = modelIdSuffix(opt.name, opt.modelId);
     return (
       <button
         className="picker-row"
@@ -151,7 +152,7 @@ export function ModelPickerPanel({
         {/* A name is not an identifier — omp lets two models of one provider
             share it — so the id has to stay visible. omp also ships `name === id`
             for custom providers, which would print it twice. */}
-        {label !== opt.modelId && <code className="picker-row-meta">{opt.modelId}</code>}
+        {idSuffix && <code className="picker-row-meta">{idSuffix}</code>}
       </button>
     );
   };
