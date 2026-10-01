@@ -454,14 +454,41 @@ handled or safely ignored.
   data-loss bugs in this editor came from treating such a list as the full value
   set. The pattern is "known values first, then union with whatever the file
   declares" — `thinkingRows` / `orderedThinkingEfforts` in
-  `ModelsConfig-types.ts` are the reference. Reuse it for every new enum.
-- Known gaps, deliberately left alone: disabling the effort that
-  `thinking.defaultLevel` names leaves it dangling (server validation does not
-  check the pair — clearing the level would silently discard intent, blocking
-  the disable would invent a rule). And omp accepts `auth: "oauth"` with custom
-  models where omp-web accepts only `"none"`; the UI offers `auth` solely as the
-  `No API key required (auth: none)` checkbox, so it can never write `oauth` and
-  the divergence is only reachable from hand-written YAML.
+  `ModelsConfig-types.ts` are the reference (and `authRows` is that pattern
+  applied to `auth`). Reuse it for every new enum.
+- **Every model surface must show the `id`, not just the `name`.** A display
+  name is not an identifier (two models of one provider may share it) and
+  `filterModelOptions` already matches name, modelId *and* provider
+  (`ChatInput-model-options.ts`), so a name-only surface searches fine and
+  still leaves the user unable to tell two rows apart. Use `modelLabel` /
+  `modelIdSuffix` (`ModelsConfig-types.ts`) rather than inlining `name || id`;
+  `modelIdSuffix` returns null when the id would just repeat the name, because
+  omp ships `name === id` for custom providers.
+- **A `thinking.defaultLevel` must never name an effort that is not enabled.**
+  omp's `clampThinkingLevelForModel` silently snaps such a level down to the
+  nearest one it knows (`defaultLevel: max` over `efforts: [low, high]` runs as
+  `high`, no warning), so a value that quietly disagrees with itself is worse
+  than no value. Server validation does not check the pair, so the editor has
+  to: disabling the level the default names drops the default too
+  (`toast.info(modelsConfig.defaultLevelCleared)`), and wiping the whole
+  thinking block drops it just as silently.
+- **omp cannot report "discovery found nothing" — omp-web must interpret it.**
+  A provider that declares `discovery` but resolves no models dies in the same
+  "No models available" guard as a provider with no model at all, so the route
+  re-reads the failure through the shared `isNoModelBootFailure`
+  (`lib/omp/rpc-utility.ts`) and answers `200 { models: [], reason:
+  "discovery_returned_nothing" }` instead of a 500. Only reuse the shared
+  matcher — do not add a second regex here.
+- **`auth: "oauth"` is not a keyless mode.** omp's own validator
+  (`!apiKey && auth !== "none" && auth !== "oauth"`, readable in the 18.4.6
+  bundle) exempts it from needing a key, but `oauth` only forces OAuth-style
+  request shaping — omp still feeds `providerApiKey` into the Bearer header
+  resolver, so a proxy behind it legitimately carries both. Only `auth: none`
+  lands in omp's `keylessProviders`, so only there is a key in `models.yml`
+  genuinely dead; `authIsKeyless` is the single predicate for that, and the
+  writers that change the mode (`setAuth`, `applyPreset`) are the only ones
+  that clear the key. Never widen it — hiding the field is as destructive as
+  deleting the value.
 
 ### Composer word prediction (`hooks/useWordPrediction.ts`, `components/GhostMirror.tsx`)
 - Ghost text comes from omp's `predict_word` RPC (engine = omp's
