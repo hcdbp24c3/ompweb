@@ -112,8 +112,16 @@ export function validateModelsConfig(config: ModelsFileConfig): void {
       if (!provider.baseUrl) {
         throw new Error(`Provider ${providerName}: "baseUrl" is required when defining custom models.`);
       }
-      if (!provider.apiKey && (provider.auth ?? "apiKey") !== "none") {
-        throw new Error(`Provider ${providerName}: "apiKey" is required when defining custom models unless auth is "none".`);
+      // omp only demands an apiKey when the provider is actually going to send
+      // one: `!apiKey && auth !== "none" && auth !== "oauth"` (models-config.ts
+      // in coding-agent). `oauth` is the credential omp already holds for that
+      // provider id — a hand-written `auth: oauth` file loads in omp, so
+      // rejecting it here made Settings → Save answer 400 and write nothing.
+      const auth = provider.auth ?? "apiKey";
+      if (!provider.apiKey && auth !== "none" && auth !== "oauth") {
+        throw new Error(
+          `Provider ${providerName}: "apiKey" is required when defining custom models unless auth is "none" or "oauth".`,
+        );
       }
     } else {
       // A provider without models is only reachable if it declares something
