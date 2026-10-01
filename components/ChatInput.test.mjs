@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -9,7 +10,22 @@ const jiti = createJiti(import.meta.url, {
   tsconfigPaths: true,
 });
 const { ChatInput, ModelErrorBanner, filterModelOptions } = await jiti.import("./ChatInput.tsx");
+const { ModelPickerPanel } = await jiti.import("./ChatInput-model-picker.tsx");
 const { setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+
+/** The picker's left pane only renders one provider at a time, so keep the
+ *  fixture helpers on the current model rather than relying on rail order. */
+function renderModelPicker(props) {
+  return renderToStaticMarkup(
+    React.createElement(ModelPickerPanel, {
+      modelSearchQuery: "",
+      onSearchQueryChange() {},
+      isMobile: false,
+      onSelectModel() {},
+      ...props,
+    }),
+  );
+}
 
 test("shows Queue instead of Stop for typed text during a run", () => {
   const draftKey = "chat-input-queue-action-test";
@@ -315,4 +331,73 @@ test("renders both queued prompts and attached status bar together", () => {
   assert.match(html, /Next prompt to run/);
   assert.match(html, /Waiting for model\.\.\./);
   assert.match(html, /live-status-dot/);
+});
+
+// A display name is not an identifier: omp lets two models of the same provider
+// share a `name`, and custom providers frequently ship `name === id`. The picker
+// has to show the id or those rows are indistinguishable.
+
+test("model picker rows show the model id beside the name", () => {
+  const options = [
+    { provider: "codex", modelId: "gpt-5.6-sol", name: "Codex Tier" },
+    { provider: "codex", modelId: "gpt-5.6-terra", name: "Codex Tier" },
+  ];
+  const html = renderModelPicker({
+    modelOptions: options,
+    filteredModelOptions: options,
+    currentModel: { provider: "codex", modelId: "gpt-5.6-sol" },
+  });
+
+  // Same label on both rows — only the id tells them apart.
+  assert.equal(html.match(/>Codex Tier</g)?.length, 2);
+  assert.match(html, /<code class="picker-row-meta">gpt-5\.6-sol<\/code>/);
+  assert.match(html, /<code class="picker-row-meta">gpt-5\.6-terra<\/code>/);
+});
+
+test("model picker row omits the id when it would just repeat the name", () => {
+  const options = [{ provider: "custom", modelId: "my-model", name: "my-model" }];
+  const html = renderModelPicker({
+    modelOptions: options,
+    filteredModelOptions: options,
+    currentModel: { provider: "custom", modelId: "my-model" },
+  });
+
+  assert.match(html, />my-model</);
+  assert.doesNotMatch(html, /picker-row-meta/);
+});
+
+test("model picker row carries the full selector as its title", () => {
+  const options = [{ provider: "codex", modelId: "gpt-5.6-sol", name: "Codex Tier" }];
+  const html = renderModelPicker({
+    modelOptions: options,
+    filteredModelOptions: options,
+    currentModel: { provider: "codex", modelId: "gpt-5.6-sol" },
+  });
+
+  // The visible name ellipsizes in a 360px panel; the selector must stay reachable.
+  assert.match(html, /title="codex\/gpt-5\.6-sol"/);
+});
+
+test("model picker has no dead showProvider branch left in the source", () => {
+  // Both call sites render a single provider's pane, so the optional
+  // showProvider flag was never passed. showProviderRail is unrelated.
+  const source = readFileSync(new URL("./ChatInput-model-picker.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /\bshowProvider\b/);
+});
+
+test("model selector trigger names the full provider/id selector", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ChatInput, {
+      onSend() {},
+      onAbort() {},
+      onModelChange() {},
+      isStreaming: false,
+      model: { provider: "codex", modelId: "gpt-5.6-sol" },
+      modelList: [{ provider: "codex", modelId: "gpt-5.6-sol", id: "gpt-5.6-sol", name: "Codex Tier" }],
+      modelNames: {},
+    }),
+  );
+
+  assert.match(html, /aria-label="(Change model|chatInput\.changeModel): [^"]*codex\/gpt-5\.6-sol[^"]*"/);
+  assert.match(html, /title="(Change model|chatInput\.changeModel): [^"]*codex\/gpt-5\.6-sol[^"]*"/);
 });
