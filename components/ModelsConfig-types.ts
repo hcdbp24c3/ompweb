@@ -69,6 +69,31 @@ export const TOKENIZER_OPTIONS = [
 ] as const;
 export type Tokenizer = typeof TOKENIZER_OPTIONS[number];
 
+/** omp's ProviderAuthSchema (models-config-schema-bundle.ts). `auth` says where
+ *  the credential comes from, which is why it is a select and not a checkbox:
+ *  `apiKey` (the default when unset), `none`, and `oauth` — the credential omp
+ *  already holds for that provider id. */
+export const AUTH_MODES = ["apiKey", "none", "oauth"] as const;
+export type AuthMode = typeof AUTH_MODES[number];
+
+export const isAuthMode = (value: string): value is AuthMode =>
+  (AUTH_MODES as readonly string[]).includes(value);
+
+/** Every row the auth select offers: the three known modes, then whatever the
+ *  file declares. AUTH_MODES is omp's enum, not a promise that models.yml only
+ *  ever contains those three — a hand-written provider can name anything, and a
+ *  select that cannot display it drops the value on the next unrelated save
+ *  (`mergeNode` deletes every key the payload omits). */
+export const authRows = (declared: string | undefined): string[] =>
+  declared && !isAuthMode(declared) ? [...AUTH_MODES, declared] : [...AUTH_MODES];
+
+/** True when `auth` still means "send the apiKey from this provider" — unset is
+ *  omp's apiKey default. `none` and `oauth` name a credential omp already holds,
+ *  so models.yml has no key to offer; an unrecognised mode keeps the key field
+ *  rather than hiding a key the file declares. */
+export const authUsesApiKey = (auth: string | undefined): boolean =>
+  auth === undefined || auth === "" || auth === "apiKey";
+
 /** Lets omp ask the server for the model list instead of the user writing it
  * out. `injectV1` only applies to `openai-models-list` (omp's schema rejects
  * it elsewhere), and `proxy` is the one type that needs no provider-level api. */
@@ -104,7 +129,7 @@ export interface ProviderEntry {
   baseUrl?: string;
   api?: string;
   apiKey?: string;
-  auth?: "apiKey" | "none" | "oauth";
+  auth?: AuthMode;
   headers?: Record<string, string>;
   discovery?: ProviderDiscovery;
   authHeader?: boolean;

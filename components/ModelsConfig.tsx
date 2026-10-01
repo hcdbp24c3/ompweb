@@ -33,6 +33,8 @@ import {
   THINKING_LEVELS,
   THINKING_MODES,
   TOKENIZER_OPTIONS,
+  authRows,
+  authUsesApiKey,
   discoveredToModelEntry,
   modelIdSuffix,
   modelLabel,
@@ -527,21 +529,42 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete, onAddMod
   const baseUrlV = useFieldValidation(baseUrlValidate);
 
   const apiKeyValidate = () => {
-    if (provider.auth === "none") return null;
+    if (!authUsesApiKey(provider.auth)) return null;
     if (!provider.apiKey || !provider.apiKey.trim()) return t("modelsConfig.errorApiKeyRequired");
     return null;
   };
   const apiKeyV = useFieldValidation(apiKeyValidate);
 
+  /** `auth` names where the credential comes from, so a mode omp resolves itself
+   *  (`none`, `oauth`) leaves nothing for `apiKey` to hold — drop it rather than
+   *  keep a secret in models.yml that the editor can no longer show or explain.
+   *  Applied by the writers that *change* the mode, so a hand-written
+   *  `auth: oauth` that also carries a key keeps that key. */
+  const withoutDeadApiKey = (auth: ProviderEntry["auth"]): Pick<ProviderEntry, "apiKey"> =>
+    auth !== undefined && !authUsesApiKey(auth) ? { apiKey: undefined } : {};
+
+  /** The rows come from `authRows`, so `raw` can be a mode this editor has no
+   *  name for; it is written back verbatim rather than narrowed away. */
+  const setAuth = (raw: string) => {
+    const next = (raw || undefined) as ProviderEntry["auth"];
+    onChange({ ...provider, auth: next, ...withoutDeadApiKey(next) });
+    apiKeyV.onChange();
+    apiKeyV.onBlur();
+  };
+
   const trimmedRename = editingName.trim();
   const hostName = provider.baseUrl ? (provider.baseUrl.replace(/^https?:\/\//, "").split("/")[0] || provider.baseUrl) : t("modelsConfig.defaultEndpoint");
 
   const applyPreset = (preset: EndpointPreset) => {
+    // The Ollama/LM Studio presets force `none`, so they can retire a key the
+    // same way the select does — the field is about to be hidden either way.
+    const auth = preset.auth === "keep" ? provider.auth : preset.auth;
     onChange({
       ...provider,
       baseUrl: preset.baseUrl,
       api: "openai-completions",
-      auth: preset.auth === "keep" ? provider.auth : preset.auth,
+      auth,
+      ...withoutDeadApiKey(auth),
     });
     toast.success(t("modelsConfig.appliedPreset", { url: preset.baseUrl }));
   };
@@ -561,9 +584,9 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete, onAddMod
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            {provider.auth === "none" ? (
+            {provider.auth === "none" || provider.auth === "oauth" ? (
               <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 4, background: "var(--bg-subtle)", color: "var(--text-muted)", fontWeight: 500 }}>
-                {t("modelsConfig.authNone")}
+                {provider.auth === "oauth" ? t("modelsConfig.authOAuth") : t("modelsConfig.authNone")}
               </span>
             ) : provider.apiKey ? (
               <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 4, background: "color-mix(in srgb, var(--accent) 15%, transparent)", color: "var(--accent)", fontWeight: 600 }}>
@@ -651,31 +674,38 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete, onAddMod
         </FormField>
 
         <FormField
-          label={t("modelsConfig.apiKey")}
-          hint={<CodeText text={t("modelsConfig.apiKeyHint")} />}
-          error={apiKeyV.error}
+          label={t("modelsConfig.authMode")}
+          hint={<CodeText text={t("modelsConfig.authModeHint")} />}
         >
-          <SecretInput
-            value={provider.apiKey ?? ""}
-            onChange={(v) => { set("apiKey", v || undefined); apiKeyV.onChange(); }}
-            placeholder={t("modelsConfig.apiKeyPlaceholder")}
-            invalid={Boolean(apiKeyV.error)}
-            error={apiKeyV.error}
-            onBlurValidate={apiKeyV.onBlur}
-            showLabel={t("modelsConfig.showApiKey")}
-            hideLabel={t("modelsConfig.hideApiKey")}
+          <FormSelect
+            value={provider.auth ?? ""}
+            onChange={setAuth}
+            options={authRows(provider.auth)}
+            placeholder={t("modelsConfig.modelDefault")}
           />
         </FormField>
 
-        <FormCheck
-          label={t("modelsConfig.noApiKeyRequired")}
-          checked={provider.auth === "none"}
-          onChange={(v) => {
-            set("auth", v ? "none" : undefined);
-            if (v) apiKeyV.onChange();
-            apiKeyV.onBlur();
-          }}
-        />
+        {/* The key field belongs to the apiKey mode: `none` and `oauth` name a
+            credential omp already holds, so an empty box here would only invite
+            a value that is never sent. */}
+        {authUsesApiKey(provider.auth) && (
+          <FormField
+            label={t("modelsConfig.apiKey")}
+            hint={<CodeText text={t("modelsConfig.apiKeyHint")} />}
+            error={apiKeyV.error}
+          >
+            <SecretInput
+              value={provider.apiKey ?? ""}
+              onChange={(v) => { set("apiKey", v || undefined); apiKeyV.onChange(); }}
+              placeholder={t("modelsConfig.apiKeyPlaceholder")}
+              invalid={Boolean(apiKeyV.error)}
+              error={apiKeyV.error}
+              onBlurValidate={apiKeyV.onBlur}
+              showLabel={t("modelsConfig.showApiKey")}
+              hideLabel={t("modelsConfig.hideApiKey")}
+            />
+          </FormField>
+        )}
 
         {provider.apiKey && (
           <FormCheck

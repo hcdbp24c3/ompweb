@@ -138,6 +138,9 @@ const PROVIDER_EDITOR_KEYS = [
   "modelsConfig.authHeaderHint",
   "modelsConfig.disableStrictTools",
   "modelsConfig.disableStrictToolsHint",
+  "modelsConfig.authMode",
+  "modelsConfig.authModeHint",
+  "modelsConfig.authOAuth",
   "errors.discover_failed",
 ];
 
