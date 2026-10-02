@@ -148,3 +148,22 @@ export function parseDiscoverOutput(raw: string): DiscoverResult {
 export function pluginInstallRef(name: string, marketplace?: string | null): string {
   return marketplace ? `${name}@${marketplace}` : name;
 }
+/**
+ * The argv for omp's marketplace subcommands: `add <source>`,
+ * `remove <name>`, `update [<name>]` — `list` is the default subcommand and is
+ * invoked bare. Mirrors `handleMarketplace` (coding-agent src/cli/plugin-cli.ts),
+ * which switches on `args[0] ?? "list"`.
+ *
+ * Exists so the CLI shape is pinned by a plain unit test. The route cannot be
+ * tested this way: it spawns through `import { execFile } from "child_process"`,
+ * and jiti binds that named import to a local const at module-eval time, so
+ * `t.mock.method(childProcess, "execFile", ...)` never intercepts it — verified
+ * with moduleCache:false, tryNative:false and interopDefault alike.
+ */
+export type MarketplaceSubcommand = "list" | "add" | "remove" | "update";
+
+export function marketplaceArgv(subcommand: MarketplaceSubcommand, target?: string | null): string[] {
+  if (subcommand === "list") return ["plugin", "marketplace"];
+  if (!target) return ["plugin", "marketplace", subcommand];
+  return ["plugin", "marketplace", subcommand, target];
+}

@@ -4,7 +4,7 @@ import { existsSync, promises as fs } from "fs";
 import { basename, extname, join } from "path";
 import { resolveOmpBin } from "@/lib/omp/omp-cli";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
-import { parseDiscoverOutput, parseMarketplaceList } from "@/lib/omp/plugin-marketplace";
+import { marketplaceArgv, parseDiscoverOutput, parseMarketplaceList } from "@/lib/omp/plugin-marketplace";
 import type { DiscoverablePlugin, MarketplaceEntry } from "@/lib/omp/plugin-marketplace";
 import type {
   PluginDiagnostic,
@@ -311,7 +311,7 @@ async function readMarketplaces(): Promise<{
   marketplaceWarning: string | null;
 }> {
   try {
-    const { stdout } = await runOmp(["plugin", "marketplace"], { timeout: 120_000 });
+    const { stdout } = await runOmp(marketplaceArgv("list"), { timeout: 120_000 });
     const parsed = parseMarketplaceList(stdout);
     return { marketplaces: parsed.marketplaces, marketplaceWarning: parsed.warning };
   } catch (error) {
@@ -379,23 +379,20 @@ export async function POST(req: Request) {
       await runOmp(["plugin", body.action, source, "--json", ...scopeArgs], { cwd: body.cwd, timeout: 60_000 });
     } else if (body.action === "marketplace_add") {
       if (!source) return NextResponse.json({ error: "source required", code: "source_required" }, { status: 400 });
-      await runOmp(["plugin", "marketplace", "add", source], { cwd: body.cwd, timeout: 300_000 });
+      await runOmp(marketplaceArgv("add", source), { cwd: body.cwd, timeout: 300_000 });
       return NextResponse.json({
         ...(await readPlugins(body.cwd)),
         ...(await readMarketplaces()),
       });
     } else if (body.action === "marketplace_remove") {
       if (!source) return NextResponse.json({ error: "source required", code: "source_required" }, { status: 400 });
-      await runOmp(["plugin", "marketplace", "remove", source], { cwd: body.cwd, timeout: 120_000 });
+      await runOmp(marketplaceArgv("remove", source), { cwd: body.cwd, timeout: 120_000 });
       return NextResponse.json({
         ...(await readPlugins(body.cwd)),
         ...(await readMarketplaces()),
       });
     } else if (body.action === "marketplace_update") {
-      await runOmp(
-        ["plugin", "marketplace", "update", ...(source ? [source] : [])],
-        { cwd: body.cwd, timeout: 300_000 },
-      );
+      await runOmp(marketplaceArgv("update", source), { cwd: body.cwd, timeout: 300_000 });
       return NextResponse.json({
         ...(await readPlugins(body.cwd)),
         ...(await readMarketplaces()),
