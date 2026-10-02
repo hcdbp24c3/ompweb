@@ -33,7 +33,20 @@ export const UTILITY_EXTRA_ARGS = ["--no-session", "--no-skills", "--no-lsp"];
 // installed catalog; the rest are fallbacks for a future catalog that drops it.
 // Ids that do NOT exist in the catalog are deliberately left out — one of them
 // (`openai-codex/gpt-5-codex`) was verified missing.
-export const BOOT_MODEL_CANDIDATES = ["anthropic/claude-sonnet-4-5", "openai/gpt-5", "openai/gpt-4o"];
+//
+// The leading entries are bare provider ids because `--model` fuzzy-matches
+// ("opus", "gpt-5.2", "openai/gpt-5.2" all resolve — verified on omp 18.4.6), so
+// they keep working when omp renames a model. A pinned `provider/model-id`
+// candidate is precise but dies with the first catalog bump that renames it,
+// which is exactly how a login route silently stops working on a newer omp: the
+// fallback exhausts and omp's own "No models available" surfaces verbatim.
+export const BOOT_MODEL_CANDIDATES = [
+  "anthropic",
+  "openai",
+  "anthropic/claude-sonnet-4-5",
+  "openai/gpt-5",
+  "openai/gpt-4o",
+];
 
 // omp's own wording when it refuses to boot without a model (stderr tail is
 // folded into the exit error by RpcProcess), plus the message it prints when an
