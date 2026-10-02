@@ -17,7 +17,7 @@ import { RpcProcess } from "./rpc-process";
 // omitting them made the web UI's model/provider lists disagree with the CLI's.
 // Measured against a real install (omp/17.1.3): ready-frame latency is the same
 // either way (~3.6s with vs ~4.0s without over 4 runs each).
-const UTILITY_EXTRA_ARGS = ["--no-session", "--no-skills", "--no-lsp"];
+export const UTILITY_EXTRA_ARGS = ["--no-session", "--no-skills", "--no-lsp"];
 
 // omp exits 1 when it resolves zero models, and that check (coding-agent's
 // main.ts:2425) runs BEFORE the `mode === "rpc"` branch, so the process dies
@@ -47,11 +47,22 @@ export function isNoModelBootFailure(error: unknown): boolean {
 }
 
 /** Base utility args, plus `--model <selector>` only when one is supplied, so a
- *  user who already has a working model boots exactly as before. */
+ *  user who already has a working model boots exactly as before.
+ *
+ *  `baseArgs` is a parameter because other omp processes hit the same guard and
+ *  need the same treatment with a different base: the login route spawns its own
+ *  dedicated process with `--no-extensions`, and reusing UTILITY_EXTRA_ARGS there
+ *  would re-enable extensions and change which login providers it can see.
+ *
+ *  `boot` owns its own argument list, so other processes can reuse this loop
+ *  with a different base: the login route passes --no-extensions and must not
+ *  inherit UTILITY_EXTRA_ARGS, which keeps extensions enabled on purpose. */
+export function bootExtraArgs(baseArgs: readonly string[], modelSelector?: string): string[] {
+  return modelSelector ? [...baseArgs, "--model", modelSelector] : [...baseArgs];
+}
+
 export function utilityExtraArgs(modelSelector?: string): string[] {
-  return modelSelector
-    ? [...UTILITY_EXTRA_ARGS, "--model", modelSelector]
-    : [...UTILITY_EXTRA_ARGS];
+  return bootExtraArgs(UTILITY_EXTRA_ARGS, modelSelector);
 }
 
 /** Boot attempt order: no selector first (the current happy path), then the

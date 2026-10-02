@@ -2379,16 +2379,19 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                       </div>
                     </div>
 
-                    {/* Filtered list or curated list */}
+                    {/* Filtered list or curated list.
+                        Only the oauth/login cards live here. The API-key half was
+                        removed: /api/auth/all-providers derives its list from
+                        get_available_models — "models with valid API keys" — and
+                        marks every row configured, so `!configured` was empty on
+                        every install and "Set Key" only ever opened a read-only
+                        status page. Set the guidance note below instead. */}
                     {(() => {
                       const q = connectSearch.trim().toLowerCase();
                       const unlinkedOAuth = oauthProviders.filter(p => !p.loggedIn);
-                      const unconfiguredApiKey = apiKeyProviders.filter(p => !p.configured);
                       const matchingOAuth = unlinkedOAuth.filter(p => !q || p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q));
-                      const matchingApiKey = unconfiguredApiKey.filter(p => !q || p.displayName.toLowerCase().includes(q) || p.id.toLowerCase().includes(q));
 
                       const displayedOAuth = q ? matchingOAuth : matchingOAuth.slice(0, 6);
-                      const displayedApiKey = q ? matchingApiKey : matchingApiKey.slice(0, 6);
 
                       return (
                         <div className="provider-grid">
@@ -2413,28 +2416,12 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                               </div>
                             </div>
                           ))}
-                          {displayedApiKey.map((p) => (
-                            <div key={p.id} className="provider-grid-card" style={{ minHeight: 90 }}>
-                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-                                <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
-                                  <ProviderIcon id={p.id} size={24} />
-                                  <div>
-                                    <div style={{ fontSize: "var(--text-md)", fontWeight: 600, color: "var(--text)" }}>{p.displayName}</div>
-                                    <div style={{ fontSize: "var(--text-xs)", color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>API Key</div>
-                                  </div>
-                                </div>
-                                <button
-                                  type="button"
-                                  onClick={() => setSelection({ type: "apikey", providerId: p.id })}
-                                  className="settings-back"
-                                  style={{ padding: "4px 12px", fontSize: "var(--text-sm)", border: "1px solid var(--border)", background: "var(--bg)" }}
-                                >
-                                  Set Key
-                                </button>
-                              </div>
+                          {displayedOAuth.length === 0 && q && (
+                            <div className="settings-empty" style={{ gridColumn: "1 / -1", padding: "20px 12px" }}>
+                              {t("modelsConfig.noMatchingProviders")}
                             </div>
-                          ))}
-                          {!q && (unlinkedOAuth.length + unconfiguredApiKey.length > 12) && (
+                          )}
+                          {!q && unlinkedOAuth.length > 6 && (
                             <button
                               type="button"
                               onClick={() => setPickerOpen(true)}
@@ -2443,13 +2430,24 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                             >
                               <Plus size={14} style={{ color: "var(--accent)" }} />
                               <span style={{ fontSize: "var(--text-body)", fontWeight: 500, color: "var(--text-muted)" }}>
-                                Browse all {unlinkedOAuth.length + unconfiguredApiKey.length} providers…
+                                Browse all {unlinkedOAuth.length} providers…
                               </span>
                             </button>
                           )}
                         </div>
                       );
                     })()}
+
+                    {/* omp-web cannot store API keys: they live in omp's
+                        encrypted credential store, and omp's RPC login refuses
+                        providers that prompt for a secret. Say so next to the
+                        cards instead of offering a "Set Key" button that opens a
+                        read-only page. */}
+                    <p
+                      style={{ marginTop: 12, marginBottom: 0, fontSize: "var(--text-xs)", color: "var(--text-dim)", lineHeight: 1.6 }}
+                    >
+                      <CodeText text={t("modelsConfig.apiKeyManageHint")} />
+                    </p>
                   </div>
                 </div>
               )

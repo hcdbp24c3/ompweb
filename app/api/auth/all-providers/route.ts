@@ -6,9 +6,14 @@ export const dynamic = "force-dynamic";
 // omp exposes no "all known providers" query over RPC, and API keys live in
 // its SQLite credential store which omp-web must not touch. What we CAN see is
 // which providers currently resolve models (env keys, stored keys, models.yml)
-// via get_available_models — so this endpoint lists configured providers only.
-// Unconfigured API-key providers cannot be set up from the web UI (see the
-// api-key route), so they are intentionally absent.
+// via get_available_models — which omp documents as "models with valid API
+// keys". So every row here is configured BY CONSTRUCTION and this is a status
+// list, not a setup list: on a blank install it is legitimately empty, and it
+// stays empty for a provider the user has not set up.
+//
+// That is why the UI does not offer these as "Set Key" choices. To connect a
+// provider from the browser use the login route (get_login_providers → Sign in);
+// to add a key, omp-web cannot help — see the api-key route.
 export async function GET() {
   try {
     const modelsResponse = await runUtilityCommand<{ models?: unknown }>(

@@ -2,7 +2,7 @@ import { homedir } from "os";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { enableProvider } from "@/lib/omp/model-roles";
 import { RpcProcess, type RpcFrame } from "@/lib/omp/rpc-process";
-import { disposeUtilityRpc } from "@/lib/omp/rpc-utility";
+import { bootExtraArgs, disposeUtilityRpc, withBootModelFallback } from "@/lib/omp/rpc-utility";
 
 export const dynamic = "force-dynamic";
 
@@ -133,8 +133,30 @@ export async function GET(
         }
       };
 
+      let child: RpcProcess;
       try {
-        proc = new RpcProcess({ cwd: homedir(), extraArgs: LOGIN_EXTRA_ARGS, onFrame: handleFrame });
+        // omp exits 1 when it resolves zero models, and that guard runs before
+        // the RPC branch — so on a blank install the child died before the login
+        // flow started and every "Sign in" card failed. withBootModelFallback
+        // retries with a catalog model, exactly as the utility process does.
+        // LOGIN_EXTRA_ARGS is passed through rather than reusing
+        // utilityExtraArgs: this process deliberately runs --no-extensions,
+        // which changes which login providers it can see.
+        child = await withBootModelFallback(
+          async (modelSelector) => {
+            const candidate = new RpcProcess({
+              cwd: homedir(),
+              extraArgs: bootExtraArgs(LOGIN_EXTRA_ARGS, modelSelector),
+              onFrame: handleFrame,
+            });
+            // Fail inside the fallback loop, so a candidate that also cannot
+            // boot is retried rather than returned half-started.
+            const ready = await candidate.waitReady(READY_TIMEOUT_MS);
+            await candidate.negotiateProtocol(ready);
+            return candidate;
+          },
+        );
+        proc = child;
       } catch (error) {
         send({ type: "error", message: error instanceof Error ? error.message : String(error) });
         clearInterval(heartbeat);
@@ -142,7 +164,6 @@ export async function GET(
         try { controller.close(); } catch {}
         return;
       }
-      const child = proc;
 
       registry.set(token, {
         provider,
@@ -165,8 +186,6 @@ export async function GET(
       req.signal.addEventListener("abort", cleanup);
 
       try {
-        const ready = await child.waitReady(READY_TIMEOUT_MS);
-        await child.negotiateProtocol(ready);
         await child.sendCommand({ type: "login", providerId: provider }, LOGIN_TIMEOUT_MS);
         enableProvider(provider);
         invalidateModelsCache();
