@@ -1260,6 +1260,9 @@
   "settingsConfig.modelFallbackDesc": "Fall back to alternative model when retries exhaust.",
   "settingsConfig.extensionsTools": "Extensions & Tools",
   "settingsConfig.extensionsToolsDesc": "Model Context Protocol servers, managed skills, and OMP plugins.",
+  "settingsConfig.extensionsSub.mcp": "MCP サーバー",
+  "settingsConfig.extensionsSub.skills": "スキル",
+  "settingsConfig.extensionsSub.plugins": "プラグイン",
   "settingsConfig.loadProjectMcp": "Load Project MCP Servers",
   "settingsConfig.loadProjectMcpDesc": "Allow project-root MCP configuration to be discovered.",
   "settingsConfig.renderMcpMarkdown": "Render MCP Markdown",
@@ -1548,5 +1551,7 @@
   "settingsConfig.defaultVoice": "システムの既定の音声",
   "messageView.readAloud": "読み上げ",
   "messageView.stopSpeech": "読み上げを停止",
-  "settingsConfig.ttsNotSupported": "このブラウザではサポートされていません"
+  "settingsConfig.ttsNotSupported": "このブラウザではサポートされていません",
+  "modelsConfig.chipsMore": "他{count}件",
+  "modelsConfig.chipsFewer": "折りたたむ"
 }

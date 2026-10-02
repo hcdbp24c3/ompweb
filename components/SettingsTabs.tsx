@@ -39,7 +39,14 @@ export const SETTINGS_CATEGORIES: TabItem[] = [
 ];
 
 export const getNormalizedActive = (tab: SettingsTab): SettingsTab => {
-  if (tab === "skills" || tab === "plugins" || tab === "extensions") return "mcp";
+  // "extensions" was an early alias for the tab that is now called
+  // "Extensions & Tools" (id "mcp"). Skills and plugins used to be folded in
+  // here too, which made both of their panels unreachable: nothing ever selects
+  // them as the active tab, and folding them onto "mcp" meant the
+  // `currentTab === "skills"` / `"plugins"` branches could not be true. They are
+  // sub-panels of "mcp" now, reached by its own switch, so they must survive
+  // normalisation for a deep link to land on the right one.
+  if (tab === "extensions") return "mcp";
   return tab;
 };
 

@@ -1260,6 +1260,9 @@
   "settingsConfig.modelFallbackDesc": "重试耗尽时自动回退到备用模型。",
   "settingsConfig.extensionsTools": "扩展与工具",
   "settingsConfig.extensionsToolsDesc": "模型上下文协议 (MCP) 服务端、托管技能和 OMP 插件。",
+  "settingsConfig.extensionsSub.mcp": "MCP 服务器",
+  "settingsConfig.extensionsSub.skills": "技能",
+  "settingsConfig.extensionsSub.plugins": "插件",
   "settingsConfig.loadProjectMcp": "加载项目 MCP 服务端",
   "settingsConfig.loadProjectMcpDesc": "允许发现并加载项目根目录中的 MCP 配置。",
   "settingsConfig.renderMcpMarkdown": "渲染 MCP Markdown",
@@ -1548,5 +1551,7 @@
   "settingsConfig.defaultVoice": "系统默认声音",
   "messageView.readAloud": "朗读",
   "messageView.stopSpeech": "停止朗读",
-  "settingsConfig.ttsNotSupported": "当前浏览器不支持"
+  "settingsConfig.ttsNotSupported": "当前浏览器不支持",
+  "modelsConfig.chipsMore": "还有 {count} 个",
+  "modelsConfig.chipsFewer": "收起"
 }

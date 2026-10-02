@@ -1289,6 +1289,9 @@
   "settingsConfig.modelFallbackDesc": "Fall back to alternative model when retries exhaust.",
   "settingsConfig.extensionsTools": "Extensions & Tools",
   "settingsConfig.extensionsToolsDesc": "Model Context Protocol servers, managed skills, and OMP plugins.",
+  "settingsConfig.extensionsSub.mcp": "MCP servers",
+  "settingsConfig.extensionsSub.skills": "Skills",
+  "settingsConfig.extensionsSub.plugins": "Plugins",
   "settingsConfig.loadProjectMcp": "Load Project MCP Servers",
   "settingsConfig.loadProjectMcpDesc": "Allow project-root MCP configuration to be discovered.",
   "settingsConfig.renderMcpMarkdown": "Render MCP Markdown",
@@ -1577,5 +1580,7 @@
   "settingsConfig.defaultVoice": "Default system voice",
   "messageView.readAloud": "Read aloud",
   "messageView.stopSpeech": "Stop speaking",
-  "settingsConfig.ttsNotSupported": "Not supported in this browser"
+  "settingsConfig.ttsNotSupported": "Not supported in this browser",
+  "modelsConfig.chipsMore": "+{count} more",
+  "modelsConfig.chipsFewer": "Show fewer"
 }

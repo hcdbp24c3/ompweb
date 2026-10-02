@@ -27,6 +27,8 @@ const AgentsConfig = dynamic(() => import("./AgentsConfig").then((module) => mod
 const UsageConfig = dynamic(() => import("./UsageConfig").then((module) => module.UsageConfig), { loading: SettingsTabLoading, ssr: false });
 
 type UpdateState = AppUpdateInfo;
+/** Sub-panels of the "Extensions & Tools" tab. */
+type ExtensionsSubTab = "mcp" | "skills" | "plugins";
 type WindowsServiceStatus = {
   isWindows: boolean;
   isInstalled: boolean;
@@ -687,6 +689,15 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
 
 
   const currentTab = getNormalizedActive(activeTab);
+  // "Extensions & Tools" has carried the description "MCP servers, managed
+  // skills, and OMP plugins" while rendering McpConfig alone. Skills and
+  // plugins are sub-panels here rather than tabs of their own, so the settings
+  // strip stays at nine entries. Reset when the tab is left so returning to it
+  // starts on MCP.
+  const [extensionsTab, setExtensionsTab] = useState<ExtensionsSubTab>("mcp");
+  useEffect(() => {
+    if (currentTab !== "mcp") setExtensionsTab("mcp");
+  }, [currentTab]);
   const nativeSettingsRequired = currentTab === "general" || currentTab === "safety" || currentTab === "models" || currentTab === "intelligence" || currentTab === "mcp";
   useEffect(() => {
     if (currentTab === "system") {
@@ -1282,6 +1293,20 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <h2 className="display-serif" style={{ fontSize: 22, fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsConfig.extensionsTools")}</h2>
                   <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.extensionsToolsDesc")}</p>
                 </div>
+                <div className="providers-segmented" style={{ marginBottom: 0 }} role="group" aria-label={t("settingsConfig.extensionsTools")}>
+                  {(["mcp", "skills", "plugins"] as const).map((value) => (
+                    <button
+                      key={value}
+                      type="button"
+                      className={`providers-segmented-btn${extensionsTab === value ? " active" : ""}`}
+                      aria-pressed={extensionsTab === value}
+                      onClick={() => setExtensionsTab(value)}
+                    >
+                      <span>{t(`settingsConfig.extensionsSub.${value}`)}</span>
+                    </button>
+                  ))}
+                </div>
+                {extensionsTab === "mcp" && (<>
                 {cwd && (
                   <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
                     <NativeSetting searchId="load-project-mcp-servers" label={t("settingsConfig.loadProjectMcp")} description={t("settingsConfig.loadProjectMcpDesc")} scope="Native OMP">
@@ -1306,20 +1331,21 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                 )}
                 <McpConfig cwd={cwd} sessionId={sessionId} />
                 {!cwd && <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>{t("settingsConfig.selectWorkspaceForMcp")}</p>}
-              </div>
-            )}
-
-            {/* SKILLS SUB-PANEL CONTRACT MATCH */}
-            {cwd && currentTab === "skills" && (
-              <div role="tabpanel" id="settings-panel-skills" aria-labelledby="settings-tab-skills" className="settings-panel-inner" style={{ display: currentTab === "skills" ? "flex" : "none", width: "100%", maxWidth: 940, minHeight: isMobile ? undefined : 600, flexDirection: "column", padding: isMobile ? "16px 14px 32px" : "32px 24px 64px" }}>
-                <SkillsConfig embedded cwd={cwd} onClose={onClose} />
-              </div>
-            )}
-
-            {/* PLUGINS SUB-PANEL CONTRACT MATCH */}
-            {cwd && currentTab === "plugins" && (
-              <div role="tabpanel" id="settings-panel-plugins" aria-labelledby="settings-tab-plugins" className="settings-panel-inner" style={{ display: currentTab === "plugins" ? "flex" : "none", width: "100%", maxWidth: 940, minHeight: isMobile ? undefined : 600, flexDirection: "column", padding: isMobile ? "16px 14px 32px" : "32px 24px 64px" }}>
-                <PluginsConfig embedded cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onPluginsReloaded} />
+                </>)}
+                {extensionsTab === "skills" && (
+                  cwd ? (
+                    <SkillsConfig embedded cwd={cwd} onClose={onClose} />
+                  ) : (
+                    <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>{t("settingsConfig.selectWorkspaceForMcp")}</p>
+                  )
+                )}
+                {extensionsTab === "plugins" && (
+                  cwd ? (
+                    <PluginsConfig embedded cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onPluginsReloaded} />
+                  ) : (
+                    <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>{t("settingsConfig.selectWorkspaceForMcp")}</p>
+                  )
+                )}
               </div>
             )}
 

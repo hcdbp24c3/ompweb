@@ -1698,6 +1698,12 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
 
 // ── Main component ────────────────────────────────────────────────────────────
 
+/** Chips rendered per provider card before the list is collapsed. A provider
+ *  filled from a discovery probe can hold dozens of ids, and the chips wrapped
+ *  freely until they pushed the Save bar out of sight. Kept in step with
+ *  `components/ModelsConfig.provider-cards.test.mjs`. */
+const CHIPS_VISIBLE = 24;
+
 export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }: { onClose: () => void; onSelectTab?: (tab: SettingsTab) => void; onSaved?: () => void; embedded?: boolean }) {
   const { t, tn } = useI18n();
   const isMobile = useIsMobile();
@@ -1708,6 +1714,8 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
   const [savedOk, setSavedOk] = useState(false);
   const [subTab, setSubTab] = useState<"connected" | "custom" | "system">("connected");
   const [systemTab, setSystemTab] = useState<"registry" | "picker" | "roles" | "fallbacks">("registry");
+  // Providers whose chip list is currently expanded, keyed by provider name.
+  const [expandedChips, setExpandedChips] = useState<Set<string>>(() => new Set());
   const [selection, setSelection] = useState<Selection | null>(null);
   const [oauthProviders, setOauthProviders] = useState<OAuthProvider[]>([]);
   const [apiKeyProviders, setApiKeyProviders] = useState<ApiKeyProvider[]>([]);
@@ -2564,25 +2572,60 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                             </div>
 
                             {/* Models chips */}
-                            {models.length > 0 ? (
-                              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, paddingTop: 6, borderTop: "1px solid var(--border)" }}>
-                                {models.map((m, i) => (
-                                  <button
-                                    key={i}
-                                    type="button"
-                                    onClick={() => setSelection({ type: "model", providerName: pName, index: i })}
-                                    style={{
-                                      display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 8px",
-                                      borderRadius: 5, background: "var(--bg)", border: "1px solid var(--border)",
-                                      color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11, cursor: "pointer",
-                                    }}
-                                  >
-                                    <span>{m.id}</span>
-                                    {m.reasoning && <span style={{ fontSize: 9, padding: "0 3px", borderRadius: 2, background: "var(--accent-strong)", color: "var(--on-accent)", fontWeight: 700 }}>T</span>}
-                                  </button>
-                                ))}
-                              </div>
-                            ) : (
+                            {models.length > 0 ? (() => {
+                              const expanded = expandedChips.has(pName);
+                              const hidden = !expanded && models.length > CHIPS_VISIBLE;
+                              const shown = hidden ? models.slice(0, CHIPS_VISIBLE) : models;
+                              return (
+                                <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, paddingTop: 6, borderTop: "1px solid var(--border)" }}>
+                                  {shown.map((m, i) => (
+                                    <button
+                                      key={i}
+                                      type="button"
+                                      onClick={() => setSelection({ type: "model", providerName: pName, index: i })}
+                                      style={{
+                                        display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 8px",
+                                        borderRadius: 5, background: "var(--bg)", border: "1px solid var(--border)",
+                                        color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11, cursor: "pointer",
+                                      }}
+                                    >
+                                      <span>{m.id}</span>
+                                      {m.reasoning && <span style={{ fontSize: 9, padding: "0 3px", borderRadius: 2, background: "var(--accent-strong)", color: "var(--on-accent)", fontWeight: 700 }}>T</span>}
+                                    </button>
+                                  ))}
+                                  {hidden && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setExpandedChips((current) => new Set(current).add(pName))}
+                                      style={{
+                                        display: "inline-flex", alignItems: "center", padding: "3px 8px",
+                                        borderRadius: 5, background: "var(--bg)", border: "1px solid var(--border)",
+                                        color: "var(--text-muted)", fontSize: 11, cursor: "pointer",
+                                      }}
+                                    >
+                                      {t("modelsConfig.chipsMore", { count: models.length - CHIPS_VISIBLE })}
+                                    </button>
+                                  )}
+                                  {expanded && models.length > CHIPS_VISIBLE && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setExpandedChips((current) => {
+                                        const next = new Set(current);
+                                        next.delete(pName);
+                                        return next;
+                                      })}
+                                      style={{
+                                        display: "inline-flex", alignItems: "center", padding: "3px 8px",
+                                        borderRadius: 5, background: "var(--bg)", border: "1px solid var(--border)",
+                                        color: "var(--text-muted)", fontSize: 11, cursor: "pointer",
+                                      }}
+                                    >
+                                      {t("modelsConfig.chipsFewer")}
+                                    </button>
+                                  )}
+                                </div>
+                              );
+                            })() : (
                               <div style={{ fontSize: 11.5, color: "var(--text-dim)", paddingTop: 4, borderTop: "1px solid var(--border)" }}>
                                 No models defined yet. Click &quot;Add Model&quot; or &quot;Catalog&quot; above to configure models.
                               </div>
@@ -2641,9 +2684,19 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
           </div>
         )}
 
-        {/* Save controls */}
+        {/* Save controls — sticky to the bottom of the scroll container so a
+            long provider cannot push them out of reach. The opaque background
+            and top border are load-bearing: without them the rows scroll
+            through the bar. `marginTop` is replaced by padding because a sticky
+            element does not separate itself from the content above it. */}
         {(subTab === "custom" || !embedded) && (
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10, flexWrap: "wrap", marginTop: 16, flexShrink: 0 }}>
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10, flexWrap: "wrap",
+            position: "sticky", bottom: 0, zIndex: 2, flexShrink: 0,
+            marginTop: 16, paddingTop: 10, paddingBottom: 2,
+            background: "var(--bg-panel)",
+            borderTop: "1px solid var(--border)",
+          }}>
             {saveError && (
               <div style={{ flex: "1 1 220px", minWidth: 0, overflowWrap: "anywhere", fontSize: 12, color: "var(--status-error)" }}>
                 {saveError}
