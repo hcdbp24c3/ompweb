@@ -1042,9 +1042,20 @@ export function UsageConfig() {
                         <td style={{ padding: "6px 4px", color: "var(--text)", fontWeight: 500 }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                             <span style={{ width: 6, height: 6, borderRadius: "50%", backgroundColor: "var(--accent)" }} />
-                            <span title={m.model} style={{ maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              {m.model}
-                            </span>
+                            <div style={{ minWidth: 0 }}>
+                              {/* The provider rides along under the id: it was
+                                  already on every row (the React key uses it)
+                                  but never shown, so two providers serving the
+                                  same model id produced identical-looking rows.
+                                  A second line rather than a fifth column — the
+                                  table has four numeric columns already. */}
+                              <div title={`${m.provider}/${m.model}`} style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {m.model}
+                              </div>
+                              <div style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10, fontWeight: 400, fontFamily: "var(--font-mono)", color: "var(--text-dim)" }}>
+                                {m.provider}
+                              </div>
+                            </div>
                           </div>
                         </td>
                         <td style={{ padding: "6px 8px", textAlign: "right", color: "var(--text)", fontWeight: 600 }}>

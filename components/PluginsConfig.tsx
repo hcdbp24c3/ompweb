@@ -13,6 +13,8 @@ import { ConfirmDialog } from "@/components/ui/field";
 import { toast } from "@/components/ui/toast";
 import { Plus } from "lucide-react";
 import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
+import { pluginInstallRef } from "@/lib/omp/plugin-marketplace";
+import type { DiscoverablePlugin, MarketplaceEntry } from "@/lib/omp/plugin-marketplace";
 import type { PluginPackageInfo, PluginsResponse } from "@/lib/api-types";
 
 function PluginsConfigSurface({ embedded, isMobile, onClose, children }: { embedded: boolean; isMobile: boolean; onClose: () => void; children: React.ReactNode }) {
@@ -439,6 +441,264 @@ function AddPluginPanel({
   );
 }
 
+/** Marketplace sources and the catalog they expose.
+ *
+ *  Sits under the paste-a-spec box in "Add plugin" mode, because that is exactly
+ *  when a user wants somewhere to pick a plugin from. `omp plugin discover` and
+ *  `omp plugin marketplace` have no JSON mode (lib/omp/plugin-marketplace.ts), so
+ *  the two `*Warning` props are load-bearing: an unparseable response must say
+ *  so rather than render as "this marketplace has nothing". */
+function MarketplacePanel({
+  marketplaces,
+  marketplaceWarning,
+  catalog,
+  catalogWarning,
+  catalogLoaded,
+  marketSource,
+  browseFilter,
+  busyKey,
+  onMarketSourceChange,
+  onBrowseFilterChange,
+  onAddMarketplace,
+  onRemoveMarketplace,
+  onUpdateMarketplace,
+  onBrowseMarketplace,
+  onInstall,
+  t,
+}: {
+  marketplaces: MarketplaceEntry[];
+  marketplaceWarning: string | null;
+  catalog: DiscoverablePlugin[];
+  catalogWarning: string | null;
+  catalogLoaded: boolean;
+  marketSource: string;
+  browseFilter: string;
+  busyKey: string | null;
+  onMarketSourceChange: (value: string) => void;
+  onBrowseFilterChange: (value: string) => void;
+  onAddMarketplace: () => void;
+  onRemoveMarketplace: (name: string) => void;
+  onUpdateMarketplace: (name: string) => void;
+  onBrowseMarketplace: (marketplace: string) => void;
+  onInstall: (plugin: DiscoverablePlugin) => void;
+  t: (key: string, vars?: Record<string, string | number>) => string;
+}) {
+  const sectionTitle: React.CSSProperties = {
+    fontSize: 10,
+    fontWeight: 600,
+    color: "var(--text-dim)",
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  };
+
+  /** De-duplicate by plugin name. `omp plugin discover` over every marketplace
+   *  concatenates the catalogs, and a name may exist in more than one. */
+  const uniqueCatalog = useMemo(() => {
+    const seen = new Set<string>();
+    return catalog.filter((plugin) => {
+      if (seen.has(plugin.name)) return false;
+      seen.add(plugin.name);
+      return true;
+    });
+  }, [catalog]);
+
+  return (
+    <div style={{ marginTop: 22, borderTop: "1px solid var(--border)", paddingTop: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+        <span style={sectionTitle}>{t("pluginsConfig.marketplace")}</span>
+        {marketplaces.length > 0 && (
+          <button
+            type="button"
+            onClick={() => onBrowseMarketplace("")}
+            disabled={busyKey === "discover"}
+            style={buttonStyle(busyKey === "discover")}
+          >
+            {busyKey === "discover" ? t("pluginsConfig.loading") : t("pluginsConfig.browseMarketplace")}
+          </button>
+        )}
+      </div>
+
+      {/* Add a marketplace. The source may be a catalog URL, a git remote, an
+          `owner/repo` shorthand or a local directory — omp classifies it. */}
+      <div style={{ display: "flex", gap: 6 }}>
+        <input
+          value={marketSource}
+          onChange={(e) => onMarketSourceChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onAddMarketplace();
+          }}
+          placeholder={t("pluginsConfig.marketplacePlaceholder")}
+          aria-label={t("pluginsConfig.marketplacePlaceholder")}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            padding: "5px 8px",
+            fontSize: 12,
+            fontFamily: "var(--font-mono)",
+            background: "var(--bg)",
+            color: "var(--text)",
+            border: "1px solid var(--border)",
+            borderRadius: "var(--radius-control)",
+          }}
+        />
+        <button
+          type="button"
+          onClick={onAddMarketplace}
+          disabled={!marketSource.trim() || busyKey === "marketplace_add"}
+          style={buttonStyle(!marketSource.trim() || busyKey === "marketplace_add")}
+        >
+          {t("pluginsConfig.addMarketplace")}
+        </button>
+      </div>
+
+      {marketplaceWarning && (
+        <div style={{ marginTop: 8, fontSize: 11, color: "var(--status-error)", whiteSpace: "pre-wrap" }}>
+          {t("pluginsConfig.marketplaceParseWarning")}
+          <div style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginTop: 2 }}>
+            {marketplaceWarning}
+          </div>
+        </div>
+      )}
+
+      {marketplaces.length > 0 && (
+        <ul style={{ listStyle: "none", margin: "10px 0 0", padding: 0 }}>
+          {marketplaces.map((market) => (
+            <li
+              key={market.name}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "5px 0",
+                borderBottom: "1px solid var(--bg-subtle)",
+              }}
+            >
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 12, fontWeight: 500, color: "var(--text)" }}>{market.name}</div>
+                <div
+                  title={market.source}
+                  style={{
+                    fontSize: 10,
+                    fontFamily: "var(--font-mono)",
+                    color: "var(--text-dim)",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {market.source}
+                </div>
+              </div>
+              <button
+                type="button"
+                title={t("pluginsConfig.browseOne", { name: market.name })}
+                aria-label={t("pluginsConfig.browseOne", { name: market.name })}
+                onClick={() => {
+                  onBrowseFilterChange(market.name);
+                  onBrowseMarketplace(market.name);
+                }}
+                style={buttonStyle(busyKey === "discover")}
+              >
+                {t("pluginsConfig.browse")}
+              </button>
+              <button
+                type="button"
+                title={t("pluginsConfig.updateMarketplace")}
+                aria-label={t("pluginsConfig.updateMarketplace")}
+                onClick={() => onUpdateMarketplace(market.name)}
+                disabled={busyKey === `marketplace_update:${market.name}`}
+                style={buttonStyle(busyKey === `marketplace_update:${market.name}`)}
+              >
+                {t("pluginsConfig.update")}
+              </button>
+              <button
+                type="button"
+                title={t("pluginsConfig.removeMarketplace")}
+                aria-label={t("pluginsConfig.removeMarketplace")}
+                onClick={() => onRemoveMarketplace(market.name)}
+                disabled={busyKey === `marketplace_remove:${market.name}`}
+                style={buttonStyle(busyKey === `marketplace_remove:${market.name}`, true)}
+              >
+                {t("pluginsConfig.remove")}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {catalogLoaded && (
+        <div style={{ marginTop: 14 }} role="group" aria-label={t("pluginsConfig.catalog")}>
+          <div style={{ ...sectionTitle, marginBottom: 8, display: "block" }}>
+            {browseFilter
+              ? t("pluginsConfig.catalogOf", { name: browseFilter })
+              : t("pluginsConfig.catalog")}
+          </div>
+
+          {catalogWarning && (
+            <div style={{ fontSize: 11, color: "var(--status-error)", whiteSpace: "pre-wrap" }}>
+              {t("pluginsConfig.catalogParseWarning")}
+              <div style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginTop: 2 }}>
+                {catalogWarning}
+              </div>
+            </div>
+          )}
+
+          {!catalogWarning && catalog.length === 0 && (
+            <div style={{ fontSize: 12, color: "var(--text-dim)" }}>{t("pluginsConfig.noCatalogPlugins")}</div>
+          )}
+
+          {/* Browsing every marketplace concatenates the catalogs and attributes
+              nothing, so the same plugin name can appear twice. And a bare name
+              is NOT a marketplace reference to omp: `omp plugin install <name>`
+              falls through to npm (`bun install <name>`). Installing is therefore
+              only offered for a marketplace-scoped browse, where the reference is
+              `name@marketplace` and names one catalog entry unambiguously. */}
+          {uniqueCatalog.map((plugin) => (
+            <div
+              key={plugin.name}
+              style={{
+                display: "flex",
+                alignItems: "flex-start",
+                gap: 10,
+                padding: "7px 0",
+                borderBottom: "1px solid var(--bg-subtle)",
+              }}
+            >
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 12, fontWeight: 500, color: "var(--text)" }}>
+                  {plugin.name}
+                  {plugin.version && (
+                    <span style={{ color: "var(--text-dim)", fontWeight: 400 }}>@{plugin.version}</span>
+                  )}
+                </div>
+                {plugin.description && (
+                  <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{plugin.description}</div>
+                )}
+              </div>
+              {browseFilter && (
+                <button
+                  type="button"
+                  disabled={busyKey === `install:${plugin.name}`}
+                  onClick={() => onInstall(plugin)}
+                  style={buttonStyle(busyKey === `install:${plugin.name}`)}
+                >
+                  {t("pluginsConfig.install")}
+                </button>
+              )}
+            </div>
+          ))}
+
+          {catalog.length > 0 && !browseFilter && (
+            <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-dim)" }}>
+              {t("pluginsConfig.pickMarketplaceToInstall")}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PackageDetail({
   pkg,
   cwd,
@@ -637,9 +897,15 @@ export function PluginsConfig({
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [marketSource, setMarketSource] = useState("");
+  const [catalog, setCatalog] = useState<DiscoverablePlugin[]>([]);
+  const [catalogWarning, setCatalogWarning] = useState<string | null>(null);
+  const [catalogLoaded, setCatalogLoaded] = useState(false);
+  const [browseFilter, setBrowseFilter] = useState("");
 
   const packages = useMemo(() => data?.packages ?? [], [data?.packages]);
   const selectedPackage = packages.find((pkg) => packageKey(pkg) === selected) ?? null;
+  const marketplaces = useMemo(() => data?.marketplaces ?? [], [data?.marketplaces]);
 
   const groupedPackages = useMemo(() => {
     return (["project", "global"] as PluginScope[])
@@ -709,8 +975,8 @@ export function PluginsConfig({
     }
   }, [cwd, t]);
 
-  const installPlugin = useCallback(async () => {
-    const source = installSource.trim();
+  const installPlugin = useCallback(async (explicitSource?: string) => {
+    const source = (explicitSource ?? installSource).trim();
     if (!source) return;
     const key = `${installScope}\0${source}`;
     setBusyKey(`install:${key}`);
@@ -727,8 +993,12 @@ export function PluginsConfig({
       setData(next);
       const installed = findInstalledPackage(next.packages, source, installScope);
       setSelected(installed ? packageKey(installed) : key);
-      setAddMode(false);
-      setInstallSource("");
+      // A catalog install is one of possibly several; keep the panel open so the
+      // user can pick another. Only the paste-a-spec flow is finished.
+      if (explicitSource === undefined) {
+        setAddMode(false);
+        setInstallSource("");
+      }
       setActionMessage(t("pluginsConfig.packageInstalled"));
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
@@ -736,6 +1006,126 @@ export function PluginsConfig({
       setBusyKey(null);
     }
   }, [cwd, installScope, installSource, t]);
+
+  /** runOmp-backed marketplace mutations. The response already carries the
+   *  refreshed `marketplaces`, so no follow-up GET is needed. */
+  const runMarketplaceAction = useCallback(
+    async (
+      action: "marketplace_add" | "marketplace_remove" | "marketplace_update",
+      source: string,
+      busy: string,
+      successKey: string,
+    ) => {
+      setBusyKey(busy);
+      setActionError(null);
+      setActionMessage(null);
+      try {
+        const res = await fetch("/api/plugins", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action, source, cwd }),
+        });
+        const next = (await res.json()) as PluginsResponse & { error?: string; code?: string };
+        if (!res.ok || next.error) throw new Error(formatApiError(next.error ? next : `HTTP ${res.status}`));
+        setData(next);
+        if (action === "marketplace_add") setMarketSource("");
+        setActionMessage(t(successKey));
+        toast.success(t(successKey));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setActionError(msg);
+        toast.error(t("pluginsConfig.marketplaceErrorTitle"), msg);
+      } finally {
+        setBusyKey(null);
+      }
+    },
+    [cwd, t],
+  );
+
+  const addMarketplace = useCallback(() => {
+    const source = marketSource.trim();
+    if (!source) return;
+    void runMarketplaceAction("marketplace_add", source, "marketplace_add", "pluginsConfig.marketplaceAdded");
+  }, [marketSource, runMarketplaceAction]);
+
+  const removeMarketplace = useCallback(
+    (name: string) => {
+      void runMarketplaceAction(
+        "marketplace_remove",
+        name,
+        `marketplace_remove:${name}`,
+        "pluginsConfig.marketplaceRemoved",
+      );
+    },
+    [runMarketplaceAction],
+  );
+
+  const updateMarketplace = useCallback(
+    (name: string) => {
+      void runMarketplaceAction(
+        "marketplace_update",
+        name,
+        `marketplace_update:${name}`,
+        "pluginsConfig.marketplaceUpdated",
+      );
+    },
+    [runMarketplaceAction],
+  );
+
+  const browseCatalog = useCallback(async (filter?: string) => {
+    // The filter is passed in rather than read from browseFilter: the per-marketplace
+    // button sets the filter and browses in one handler, so state would still be
+    // stale here.
+    const marketplace = filter ?? browseFilter;
+    // Mirror the request into state so the catalog heading cannot describe a
+    // filter that was not the one actually sent.
+    setBrowseFilter(marketplace);
+    setBusyKey("discover");
+    setActionError(null);
+    try {
+      const res = await fetch("/api/plugins", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // `source` is the optional marketplace filter; empty means every catalog.
+        body: JSON.stringify({ action: "discover", source: marketplace || undefined, cwd }),
+      });
+      const next = (await res.json()) as PluginsResponse & {
+        error?: string;
+        code?: string;
+        catalog?: DiscoverablePlugin[];
+        catalogWarning?: string | null;
+      };
+      if (!res.ok || next.error) throw new Error(formatApiError(next.error ? next : `HTTP ${res.status}`));
+      setData(next);
+      setCatalog(next.catalog ?? []);
+      setCatalogWarning(next.catalogWarning ?? null);
+      setCatalogLoaded(true);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setActionError(msg);
+      // Keep the panel open and say why, rather than showing an empty catalog.
+      setCatalog([]);
+      setCatalogWarning(msg);
+      setCatalogLoaded(true);
+    } finally {
+      setBusyKey(null);
+    }
+  }, [browseFilter, cwd]);
+
+  /** Install a catalog entry by the reference omp itself accepts: `name@marketplace`.
+   *  The route maps a marketplace plugin's `source` to its `id`, which is that
+   *  same reference, so the installed package is still selectable afterwards. */
+  const installFromCatalog = useCallback(
+    (plugin: DiscoverablePlugin) => {
+      // Refuse to send an unqualified name: omp reads a bare `name` as an npm
+      // spec, so a click here would try to install a same-named npm package
+      // rather than the catalog entry. Without a marketplace there is no
+      // `name@marketplace` to build.
+      if (!browseFilter) return;
+      void installPlugin(pluginInstallRef(plugin.name, browseFilter));
+    },
+    [browseFilter, installPlugin],
+  );
 
   const reloadSession = useCallback(async () => {
     if (!sessionId) return;
@@ -969,16 +1359,36 @@ export function PluginsConfig({
 
           <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
             {addMode ? (
-              <AddPluginPanel
-                cwd={cwd}
-                source={installSource}
-                scope={installScope}
-                busy={addBusy}
-                actionError={actionError}
-                onSourceChange={setInstallSource}
-                onScopeChange={setInstallScope}
-                onInstall={installPlugin}
-              />
+              <>
+                <AddPluginPanel
+                  cwd={cwd}
+                  source={installSource}
+                  scope={installScope}
+                  busy={addBusy}
+                  actionError={actionError}
+                  onSourceChange={setInstallSource}
+                  onScopeChange={setInstallScope}
+                  onInstall={() => void installPlugin()}
+                />
+                <MarketplacePanel
+                  marketplaces={marketplaces}
+                  marketplaceWarning={data?.marketplaceWarning ?? null}
+                  catalog={catalog}
+                  catalogWarning={catalogWarning}
+                  catalogLoaded={catalogLoaded}
+                  marketSource={marketSource}
+                  browseFilter={browseFilter}
+                  busyKey={busyKey}
+                  onMarketSourceChange={setMarketSource}
+                  onBrowseFilterChange={setBrowseFilter}
+                  onAddMarketplace={addMarketplace}
+                  onRemoveMarketplace={removeMarketplace}
+                  onUpdateMarketplace={updateMarketplace}
+                  onBrowseMarketplace={(name) => void browseCatalog(name)}
+                  onInstall={installFromCatalog}
+                  t={t}
+                />
+              </>
             ) : loading ? (
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 <div className="skeleton" style={{ height: 18, width: "40%" }} />

@@ -1,3 +1,5 @@
+import type { DiscoverablePlugin, MarketplaceEntry } from "@/lib/omp/plugin-marketplace";
+
 export interface SkillSearchResult {
   package: string;
   installs: string;
@@ -88,4 +90,14 @@ export interface PluginsResponse {
   packages: PluginPackageInfo[];
   totals: PluginResourceCounts;
   diagnostics: PluginDiagnostic[];
+  /** Marketplaces configured with `omp plugin marketplace`. Present on every
+   *  successful response; `omp plugin list --json`'s own `marketplace` array is
+   *  installed plugins, not this list. */
+  marketplaces?: MarketplaceEntry[];
+  marketplaceWarning?: string | null;
+  /** Browsable catalog from `omp plugin discover`. Only on a discover response. */
+  catalog?: DiscoverablePlugin[];
+  /** Set when omp's marketplace output no longer matches what we can parse —
+   *  an empty catalog with a warning, never a silently empty one. */
+  catalogWarning?: string | null;
 }

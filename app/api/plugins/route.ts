@@ -4,6 +4,8 @@ import { existsSync, promises as fs } from "fs";
 import { basename, extname, join } from "path";
 import { resolveOmpBin } from "@/lib/omp/omp-cli";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { parseDiscoverOutput, parseMarketplaceList } from "@/lib/omp/plugin-marketplace";
+import type { DiscoverablePlugin, MarketplaceEntry } from "@/lib/omp/plugin-marketplace";
 import type {
   PluginDiagnostic,
   PluginPackageInfo,
@@ -19,7 +21,16 @@ export const dynamic = "force-dynamic";
 // omp-web never embeds the Bun-only SDK. `--json` output shapes are mirrored
 // from oh-my-pi coding-agent src/cli/plugin-cli.ts + extensibility/plugins.
 
-type PluginAction = "install" | "remove" | "update" | "disable" | "enable";
+type PluginAction =
+  | "install"
+  | "remove"
+  | "update"
+  | "disable"
+  | "enable"
+  | "marketplace_add"
+  | "marketplace_remove"
+  | "marketplace_update"
+  | "discover";
 
 interface OmpPluginManifest {
   name?: string;
@@ -283,13 +294,60 @@ export async function GET(req: Request) {
     if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
       return NextResponse.json({ error: "Access denied", code: "access_denied" }, { status: 403 });
     }
-    return NextResponse.json(await readPlugins(cwd));
+    return NextResponse.json({
+      ...(await readPlugins(cwd)),
+      ...(await readMarketplaces()),
+    });
   } catch (error) {
     return pluginErrorResponse(error);
   }
 }
 
+/** Read the configured marketplaces. Returns the parsed list plus any parse
+ *  warning — `omp plugin marketplace` has no JSON mode (see
+ *  lib/omp/plugin-marketplace.ts), so a format change must surface, not hide. */
+async function readMarketplaces(): Promise<{
+  marketplaces: MarketplaceEntry[];
+  marketplaceWarning: string | null;
+}> {
+  try {
+    const { stdout } = await runOmp(["plugin", "marketplace"], { timeout: 120_000 });
+    const parsed = parseMarketplaceList(stdout);
+    return { marketplaces: parsed.marketplaces, marketplaceWarning: parsed.warning };
+  } catch (error) {
+    return {
+      marketplaces: [],
+      marketplaceWarning: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/** Read the browsable catalog. `marketplace` filters to one marketplace;
+ *  `omp plugin discover` fetches every catalog when omitted, so it gets the
+ *  same generous timeout as install rather than the default. */
+async function readCatalog(marketplace?: string): Promise<{
+  catalog: DiscoverablePlugin[];
+  catalogWarning: string | null;
+}> {
+  try {
+    const { stdout } = await runOmp(
+      ["plugin", "discover", ...(marketplace ? [marketplace] : [])],
+      { timeout: 300_000 },
+    );
+    const parsed = parseDiscoverOutput(stdout);
+    return { catalog: parsed.plugins, catalogWarning: parsed.warning };
+  } catch (error) {
+    return {
+      catalog: [],
+      catalogWarning: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 // POST /api/plugins body: { action, source?, scope?, cwd }
+// `source` doubles as the plugin spec for install/remove/toggle, the marketplace
+// SOURCE for marketplace_add, and the marketplace NAME for marketplace_remove,
+// marketplace_update and the discover filter.
 export async function POST(req: Request) {
   try {
     const body = await req.json() as {
@@ -319,6 +377,34 @@ export async function POST(req: Request) {
     } else if (body.action === "disable" || body.action === "enable") {
       if (!source) return NextResponse.json({ error: "source required", code: "source_required" }, { status: 400 });
       await runOmp(["plugin", body.action, source, "--json", ...scopeArgs], { cwd: body.cwd, timeout: 60_000 });
+    } else if (body.action === "marketplace_add") {
+      if (!source) return NextResponse.json({ error: "source required", code: "source_required" }, { status: 400 });
+      await runOmp(["plugin", "marketplace", "add", source], { cwd: body.cwd, timeout: 300_000 });
+      return NextResponse.json({
+        ...(await readPlugins(body.cwd)),
+        ...(await readMarketplaces()),
+      });
+    } else if (body.action === "marketplace_remove") {
+      if (!source) return NextResponse.json({ error: "source required", code: "source_required" }, { status: 400 });
+      await runOmp(["plugin", "marketplace", "remove", source], { cwd: body.cwd, timeout: 120_000 });
+      return NextResponse.json({
+        ...(await readPlugins(body.cwd)),
+        ...(await readMarketplaces()),
+      });
+    } else if (body.action === "marketplace_update") {
+      await runOmp(
+        ["plugin", "marketplace", "update", ...(source ? [source] : [])],
+        { cwd: body.cwd, timeout: 300_000 },
+      );
+      return NextResponse.json({
+        ...(await readPlugins(body.cwd)),
+        ...(await readMarketplaces()),
+      });
+    } else if (body.action === "discover") {
+      return NextResponse.json({
+        ...(await readPlugins(body.cwd)),
+        ...(await readCatalog(source)),
+      });
     } else {
       return NextResponse.json({ error: `Unsupported action: ${body.action}`, code: "plugin_unsupported_action" }, { status: 400 });
     }
