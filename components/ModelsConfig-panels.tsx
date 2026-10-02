@@ -400,6 +400,9 @@ export function AddProviderPicker({
   const q = search.trim().toLowerCase();
 
   const availableOAuth = oauthProviders.filter((p) => !p.loggedIn && (!q || p.name.toLowerCase().includes(q)));
+  // Counted before the search filter so the note reflects what omp cannot drive
+  // rather than what the current query happens to match.
+  const terminalOnlyCount = oauthProviders.filter((p) => p.terminalOnly && !p.loggedIn).length;
   const availableApiKey = apiKeyProviders.filter((p) => !p.configured && (!q || p.displayName.toLowerCase().includes(q) || p.id.toLowerCase().includes(q)));
   const showCustom = !q || "custom".includes(q);
 
@@ -487,7 +490,18 @@ export function AddProviderPicker({
               {availableOAuth.length > 0 && (
                 <div style={{ gridColumn: "1 / -1", paddingTop: showCustom ? 6 : 0, fontSize: 10, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em" }}>{t("modelsConfig.subscriptions")}</div>
               )}
-              {availableOAuth.map((p) => (
+              {terminalOnlyCount > 0 && (
+                <div
+                  title={t("modelsConfig.terminalOnlyHint")}
+                  style={{ gridColumn: "1 / -1", fontSize: "var(--text-xs)", color: "var(--text-dim)", lineHeight: 1.6 }}
+                >
+                  {t("modelsConfig.terminalOnlyHidden", { count: terminalOnlyCount })}
+                </div>
+              )}
+              {/* A terminal-only provider must not be selectable here either:
+                  the picker is a second route into the same login flow that omp
+                  refuses over RPC. */}
+              {availableOAuth.filter((p) => !p.terminalOnly).map((p) => (
                 <button key={p.id} type="button" onClick={() => { onSelectOAuth(p.id); onClose(); }}
                   style={cardStyle}
                   onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--accent)"; e.currentTarget.style.background = "var(--bg-hover)"; }}

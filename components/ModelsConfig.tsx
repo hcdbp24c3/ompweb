@@ -2405,14 +2405,35 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                                     <div style={{ fontSize: "var(--text-xs)", color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{p.id}</div>
                                   </div>
                                 </div>
-                                <button
-                                  type="button"
-                                  onClick={() => setSelection({ type: "oauth", providerId: p.id })}
-                                  className="settings-back"
-                                  style={{ padding: "4px 12px", fontSize: "var(--text-sm)", border: "1px solid var(--border)", background: "var(--bg)" }}
-                                >
-                                  Sign in
-                                </button>
+                                {/* omp's RPC login refuses a provider whose flow
+                                    prompts before it can authorize, so a Sign in
+                                    button here could only fail. Say how to connect
+                                    it instead of offering a dead end. */}
+                                {p.terminalOnly ? (
+                                  <span
+                                    title={t("modelsConfig.terminalOnlyHint")}
+                                    style={{
+                                      padding: "4px 10px",
+                                      fontSize: "var(--text-xs)",
+                                      fontWeight: 600,
+                                      color: "var(--text-dim)",
+                                      border: "1px dashed var(--border)",
+                                      borderRadius: "var(--radius-control)",
+                                      whiteSpace: "nowrap",
+                                    }}
+                                  >
+                                    {t("modelsConfig.terminalOnly")}
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelection({ type: "oauth", providerId: p.id })}
+                                    className="settings-back"
+                                    style={{ padding: "4px 12px", fontSize: "var(--text-sm)", border: "1px solid var(--border)", background: "var(--bg)" }}
+                                  >
+                                    Sign in
+                                  </button>
+                                )}
                               </div>
                             </div>
                           ))}

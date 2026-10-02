@@ -1,4 +1,5 @@
 import { type OmpLoginProvider, runUtilityCommand } from "@/lib/omp/rpc-utility";
+import { isTerminalOnlyProvider } from "@/lib/omp/login-providers";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +27,9 @@ export async function GET() {
         name: p.name,
         usesCallbackServer: false,
         loggedIn: p.authenticated,
+        // omp cannot drive these over RPC at all (see lib/omp/login-providers.ts),
+        // so the UI must not offer a Sign in button that can only fail.
+        terminalOnly: isTerminalOnlyProvider(p.id),
       }));
     return Response.json({ providers: result });
   } catch (error) {

@@ -3,6 +3,7 @@ import { invalidateModelsCache } from "@/lib/models-cache";
 import { enableProvider } from "@/lib/omp/model-roles";
 import { RpcProcess, type RpcFrame } from "@/lib/omp/rpc-process";
 import { bootExtraArgs, disposeUtilityRpc, withBootModelFallback } from "@/lib/omp/rpc-utility";
+import { isInteractivePromptRejection } from "@/lib/omp/login-providers";
 
 export const dynamic = "force-dynamic";
 
@@ -195,7 +196,23 @@ export async function GET(
         if (req.signal.aborted) {
           send({ type: "cancelled" });
         } else {
-          send({ type: "error", message: error instanceof Error ? error.message : String(error) });
+          const raw = error instanceof Error ? error.message : String(error);
+          // omp refuses a provider whose flow prompts before it can authorize
+          // ("...not supported in RPC mode. Use the terminal UI to log in.").
+          // That sentence names no provider and no next step, so restate it in
+          // terms of what this provider actually needs. Checked at runtime as
+          // well as from the measured list, so a provider that starts refusing
+          // on a newer omp gets the same explanation.
+          send({
+            type: "error",
+            message: isInteractivePromptRejection(raw, provider)
+              ? `${provider} asks for something before it can open an authorization page, ` +
+                "which a browser session cannot answer. Run `omp` in a terminal and use /login, " +
+                "or set the provider's environment variable, or add a custom provider in ~/.omp/agent/models.yml. " +
+                `omp said: ${raw}`
+              : raw,
+            code: isInteractivePromptRejection(raw, provider) ? "login_terminal_only" : undefined,
+          });
         }
       } finally {
         cleanup();

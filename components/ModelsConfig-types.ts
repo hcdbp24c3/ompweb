@@ -13,6 +13,10 @@ export interface OAuthProvider {
   name: string;
   usesCallbackServer: boolean;
   loggedIn: boolean;
+  /** omp cannot drive this provider's login over RPC — its flow prompts before
+   *  it can authorize. Measured in lib/omp/login-providers.ts. Optional so an
+   *  older cached response still renders. */
+  terminalOnly?: boolean;
 }
 
 export interface ApiKeyProvider {

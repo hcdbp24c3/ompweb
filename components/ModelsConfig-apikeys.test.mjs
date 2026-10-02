@@ -33,10 +33,20 @@ const OAUTH_PROVIDERS = [
   { id: "openrouter", name: "OpenRouter", loggedIn: false },
 ];
 
-function mount({ apiKeyProviders = [] } = {}) {
+// omp refuses to drive github-copilot over RPC: its flow asks whether the
+// account is github.com or a GHE enterprise domain before it makes its device
+// request, and the prompt hook rejects that. Five providers measured, of which
+// this is the one users hit most.
+const TERMINAL_ONLY = [
+  { id: "github-copilot", name: "GitHub Copilot", loggedIn: false, terminalOnly: true },
+];
+
+function mount({ apiKeyProviders = [], oauthProviders = OAUTH_PROVIDERS } = {}) {
   globalThis.fetch = async (url) => {
     const target = String(url);
-    if (target.startsWith("/api/auth/providers")) return jsonResponse({ providers: OAUTH_PROVIDERS });
+    if (target.startsWith("/api/auth/providers")) {
+      return jsonResponse({ providers: [...oauthProviders, ...TERMINAL_ONLY] });
+    }
     if (target.startsWith("/api/auth/all-providers")) return jsonResponse({ providers: apiKeyProviders });
     if (target.startsWith("/api/models-config")) {
       return jsonResponse({ providers: {}, models: [] });
@@ -88,4 +98,60 @@ test("Sign in cards are offered for providers with no stored credential", async 
   await mount();
   const signIn = screen.getAllByRole("button", { name: "Sign in" });
   assert.equal(signIn.length, OAUTH_PROVIDERS.length, "every unlinked provider is actionable");
+});
+
+test("a provider omp cannot log in over RPC is marked instead of given a dead Sign in button", async () => {
+  await mount();
+  // github-copilot is in the list, so it must be labelled rather than offered.
+  assert.ok(screen.getByText("GitHub Copilot"), "the provider is still listed");
+  assert.equal(
+    screen.queryAllByRole("button", { name: "Sign in" }).length,
+    OAUTH_PROVIDERS.length,
+    "only the providers omp can actually drive get a Sign in button",
+  );
+  assert.ok(
+    screen.getAllByText(/terminal/i).length > 0,
+    "and the terminal-only one says so",
+  );
+});
+
+test("the terminal-only marker explains what to do instead of leaving a silent card", async () => {
+  await mount();
+  const badges = screen.getAllByText(/terminal/i).map((el) => el.textContent ?? "");
+  assert.ok(
+    badges.some((text) => /omp|terminal/i.test(text)),
+    `expected an explanatory marker, saw ${JSON.stringify(badges)}`,
+  );
+});
+
+
+test("the browse-all picker does not offer terminal-only providers either", async () => {
+  // The picker only appears past 6 unlinked providers, so pad the list.
+  const filler = ["xai", "kimi-code", "zai", "cursor", "devin"].map((id) => ({
+    id, name: id, loggedIn: false,
+  }));
+  await mount({ oauthProviders: [...OAUTH_PROVIDERS, ...filler] });
+  // The picker is a second route into the same login flow omp refuses, so it
+  // must withhold them and say how many it withheld.
+  const browseAll = screen.getByRole("button", { name: /browse all/i });
+  assert.ok(browseAll, "the picker is reachable");
+  const { fireEvent } = await import("@testing-library/react/pure.js");
+  await act(async () => { fireEvent.click(browseAll); });
+  await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+
+  // Guard against the slice(0, 6) making the assertion below pass for the wrong
+  // reason: a provider omp CAN drive must be present in the open picker.
+  assert.equal(
+    screen.queryByText("GitHub Copilot"),
+    null,
+    "a provider omp cannot log in is not selectable from the picker",
+  );
+  assert.ok(
+    screen.getByText("openrouter"),
+    "and providers omp CAN drive are still listed",
+  );
+  assert.ok(
+    screen.getByText(/need a terminal to sign in/i),
+    "and the picker explains why the list is shorter",
+  );
 });
