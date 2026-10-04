@@ -57,11 +57,24 @@ class FakeResizeObserver {
   trigger() { this.callback([], this); }
 }
 
-/** Minimal xterm stand-in: records what was written and the keystrokes it got. */
+/**
+ * Minimal xterm stand-in: records what was written, the keystrokes it got, and
+ * the geometry every `fit()` was called with.
+ *
+ * Both fit doubles are deliberately steerable, because the review that found the
+ * resize defect also found why no test could see it: `fit()` was an empty no-op,
+ * so "the resize path refits" was unfalsifiable — it passed against a panel that
+ * never refitted. `proposeDimensions()` used to answer a scripted constant, so
+ * the hidden-panel path was never exercised. The two answers the real addon gives
+ * are both reproduced here: `undefined` for a 0×0 cell, and a *truthy*
+ * `{cols: NaN, rows: NaN}` for a panel hidden with `display: none`, which
+ * resolves every used length to `auto` and so parses to NaN.
+ */
 function termKit({ cols = 80, rows = 24 } = {}) {
   const written = [];
   const dataHandlers = [];
   const created = [];
+  const fits = [];
   let proposed = { cols, rows };
 
   const Terminal = class {
@@ -79,14 +92,21 @@ function termKit({ cols = 80, rows = 24 } = {}) {
     onResize() { return { dispose() {} }; }
   };
   const FitAddon = class {
-    fit() {}
+    fit() { fits.push(proposed); }
     proposeDimensions() { return proposed; }
   };
 
   return {
     written,
     created,
+    /** One entry per `fit()` call, holding the measurement it was fitted to. */
+    fits,
     type: (data) => { for (const cb of dataHandlers) cb(data); },
+    /** A panel the user cannot see: the right panel keeps visited views mounted
+     *  and hides them with `display: none`, which is what produces the NaN pair. */
+    hidden() { proposed = { cols: NaN, rows: NaN }; },
+    /** A genuinely 0×0 cell, the addon's `undefined`. */
+    collapsed() { proposed = undefined; },
     resizeTo(next) { proposed = next; },
     loadTerminal: async () => ({ Terminal, FitAddon }),
   };
@@ -132,6 +152,9 @@ beforeEach(() => {
 afterEach(cleanup);
 
 const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+
+/** Past the panel's 150 ms resize debounce, with room to spare. */
+const pastResizeDebounce = () => act(async () => { await new Promise((r) => setTimeout(r, 250)); });
 
 /**
  * Deliver each part as its own read, so a chunk boundary really falls between
@@ -532,6 +555,7 @@ test("every resize carries cols and rows together, debounced to the final size",
   render(React.createElement(TerminalPanel, { cwd: "/repo", loadTerminal: kit.loadTerminal }));
   await settle();
   const before = posts.length;
+  const fitted = kit.fits.length;
 
   await act(async () => {
     kit.resizeTo({ cols: 100, rows: 30 });
@@ -539,12 +563,112 @@ test("every resize carries cols and rows together, debounced to the final size",
     kit.resizeTo({ cols: 120, rows: 40 });
     observers[0].trigger();
   });
-  await act(async () => { await new Promise((r) => setTimeout(r, 250)); });
+  await pastResizeDebounce();
 
   const resizes = posts.slice(before);
   assert.equal(resizes.length, 1, "a drag posts once, not once per observer callback");
   assert.deepEqual(resizes[0].body, { cwd: "/repo", cols: 120, rows: 40 });
   assert.ok(posts.every((p) => p.body.data === undefined), "no keystroke was invented by a resize");
+  // The refit shares the debounce for the same reason: a fit redraws the whole
+  // canvas, so one per observer callback is a redraw storm on every drag.
+  assert.equal(kit.fits.length, fitted + 1, "a drag fits once, to the size it ends at");
+  assert.deepEqual(kit.fits.at(-1), { cols: 120, rows: 40 });
+});
+
+test("a resize refits the terminal, so the view and the shell stay the same shape", async () => {
+  // The panel fitted xterm once, at mount, and then only told the server the new
+  // size — so the shell reflowed while the view kept the canvas it opened with.
+  // The view is not just cosmetic: it is what covers the Stop-shell button. Below
+  // about 950px of window height the screen overflowed the panel, `elementFromPoint`
+  // at the button's centre returned `DIV.xterm-screen`, and a real click on the
+  // only control that can kill a shell was intercepted.
+  const kit = termKit();
+  render(React.createElement(TerminalPanel, { cwd: "/repo", loadTerminal: kit.loadTerminal }));
+  await settle();
+  assert.equal(kit.fits.length, 1, "the terminal is fitted once when it opens");
+  const before = posts.length;
+
+  await act(async () => { kit.resizeTo({ cols: 120, rows: 40 }); observers[0].trigger(); });
+  await pastResizeDebounce();
+
+  assert.equal(kit.fits.length, 2, "the resize path refits; without it the view never resizes");
+  assert.deepEqual(kit.fits.at(-1), { cols: 120, rows: 40 }, "fitted to the size the shell is told");
+  const resizes = posts.slice(before);
+  assert.equal(resizes.length, 1);
+  assert.deepEqual(resizes[0].body, { cwd: "/repo", cols: 120, rows: 40 });
+});
+
+test("a panel shown again after being hidden refits to its real size", async () => {
+  // The right panel keeps every visited view mounted and hides it with
+  // `display: none`, so switching to another tab and back is the same event the
+  // window resize is: the host gets a box again and the observer fires. That
+  // callback is the only thing that can put the view back in step.
+  const kit = termKit();
+  render(React.createElement(TerminalPanel, { cwd: "/repo", loadTerminal: kit.loadTerminal }));
+  await settle();
+  const fitted = kit.fits.length;
+  await act(async () => { kit.hidden(); observers[0].trigger(); });
+  await pastResizeDebounce();
+  assert.equal(kit.fits.length, fitted, "and nothing to fit while the panel has no box");
+
+  await act(async () => { kit.resizeTo({ cols: 90, rows: 28 }); observers[0].trigger(); });
+  await pastResizeDebounce();
+  assert.equal(kit.fits.length, fitted + 1, "showing it again refits it");
+  assert.deepEqual(kit.fits.at(-1), { cols: 90, rows: 28 });
+});
+
+test("a hidden panel posts nothing, instead of dimensions that serialize to null", async () => {
+  // `display: none` resolves every used length to `auto`, `parseInt("auto")` is
+  // NaN, `Math.max(2, NaN)` is still NaN, and the addon returns that pair anyway
+  // because it is truthy — so the panel passed a check that a guard cannot make
+  // and `JSON.stringify` turned it into `null`. Every switch away from a
+  // mounted terminal cost a POST that came back 400 terminal_size_invalid.
+  const kit = termKit();
+  render(React.createElement(TerminalPanel, { cwd: "/repo", loadTerminal: kit.loadTerminal }));
+  await settle();
+  const before = posts.length;
+  const fitted = kit.fits.length;
+
+  await act(async () => { kit.hidden(); observers[0].trigger(); });
+  await pastResizeDebounce();
+
+  // The request that used to be made, spelled out rather than left implicit.
+  assert.equal(JSON.stringify({ cols: NaN, rows: NaN }), '{"cols":null,"rows":null}');
+  assert.deepEqual(posts.slice(before), [], "a hidden panel has no size to post");
+  assert.equal(kit.fits.length, fitted, "and fitting that pair would resize xterm itself to NaN");
+});
+
+test("a cell with no area is not a size either", async () => {
+  // The addon's other answer is `undefined`, for a host that really is 0×0. A
+  // panel that treated that as "nothing happened" is fine; a panel that treated
+  // it as a reason to post would post nothing valid, and one that treated it as
+  // a reason to fit would call fit() against no viewport at all.
+  const kit = termKit();
+  render(React.createElement(TerminalPanel, { cwd: "/repo", loadTerminal: kit.loadTerminal }));
+  await settle();
+  const before = posts.length;
+  const fitted = kit.fits.length;
+
+  await act(async () => { kit.collapsed(); observers[0].trigger(); });
+  await pastResizeDebounce();
+
+  assert.deepEqual(posts.slice(before), []);
+  assert.equal(kit.fits.length, fitted);
+});
+
+test("a panel that mounts hidden neither fits nor claims a size it cannot measure", async () => {
+  // A cwd change while the user is on another tab remounts the panel hidden, so
+  // this is a reachable mount state and not a corner case. Fitting here would
+  // resize the new terminal to NaN, and `cols=NaN` in the query is a size the
+  // server quietly replaces with its 80×24 default.
+  const kit = termKit();
+  kit.hidden();
+  render(React.createElement(TerminalPanel, { cwd: "/repo", loadTerminal: kit.loadTerminal }));
+  await settle();
+
+  assert.equal(kit.fits.length, 0, "no fit against a viewport that cannot be measured");
+  assert.equal(streams.length, 1, "the shell is still opened");
+  assert.doesNotMatch(streams[0].url, /NaN|cols=|rows=/, "and the stream falls back to the server's own default");
 });
 
 test("splitSseFrames delivers unnamed data frames and ignores the rest", () => {

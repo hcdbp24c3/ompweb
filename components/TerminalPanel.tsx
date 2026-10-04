@@ -134,6 +134,27 @@ function xtermFontSize(): number | undefined {
   return Number.isFinite(size) ? size : undefined;
 }
 
+/**
+ * The measurement the panel may act on — fit xterm to it, or post it — or `null`.
+ *
+ * The addon's two refusals are not the same shape, and only the obvious one is
+ * safe to treat as "nothing happened". A host that is genuinely 0×0 makes
+ * `proposeDimensions()` return `undefined`. A host hidden with `display: none`
+ * — which is exactly how the right panel keeps a visited terminal — instead
+ * yields used lengths of `auto`, so `parseInt` gives `NaN` and the addon's own
+ * `Math.max(2, …)` clamp cannot rescue it: the pair comes back **truthy**.
+ * `JSON.stringify` then writes it as `null`, and the input route answers
+ * `400 terminal_size_invalid` because `typeof null !== "number"`.
+ *
+ * (`fit()` declines that NaN pair itself, so this is about what the panel
+ * propagates, not about xterm being corrupted.)
+ */
+function usableSize(size: { cols: number; rows: number } | undefined): { cols: number; rows: number } | null {
+  if (!size) return null;
+  if (!Number.isFinite(size.cols) || !Number.isFinite(size.rows)) return null;
+  return size;
+}
+
 async function readFailure(response: Response): Promise<{ authRequired: boolean; message: string }> {
   let message = `HTTP ${response.status}`;
   let authRequired = false;
@@ -255,9 +276,13 @@ export function TerminalPanel({
       const fit = new (FitAddon as new () => FitAddonInstance)();
       term.loadAddon(fit);
       term.open(host);
-      // A hidden panel measures 0×0 and proposeDimensions declines, so fit() is a
-      // no-op there and the ResizeObserver below refits it when it is shown.
-      fit.fit();
+      // Measured once and used twice: for this first fit and for the spawn size
+      // below. A panel that is not on screen has no viewport to fit, so the guard
+      // is the difference between opening a terminal and telling the server a
+      // size we could not measure. The ResizeObserver below is what refits it
+      // once the panel has a box again.
+      const openSize = usableSize(fit.proposeDimensions());
+      if (openSize) fit.fit();
 
       // Assigned before anything else can throw, so a failure from here on still
       // disposes the terminal rather than leaving it on a host nobody reads.
@@ -291,12 +316,24 @@ export function TerminalPanel({
           postedSize = null;
         });
       };
+      // Measure, fit, then tell the shell — all three inside the trailing-edge
+      // debounce. A fit redraws the whole canvas, so one per observer callback is
+      // a redraw storm on every window drag, and doing it in one place is what
+      // keeps the two sides from drifting: a view left at its mount size while the
+      // shell reflowed shows the user something the shell is not rendering, and
+      // the taller of the two covers the Stop-shell button.
+      const applySize = () => {
+        const size = usableSize(fit.proposeDimensions());
+        // Hidden, or genuinely 0×0: there is nothing to fit and nothing to send.
+        if (!size) return;
+        fit.fit();
+        sendSize(size);
+      };
       const scheduleSize = () => {
         if (resizeTimer) clearTimeout(resizeTimer);
         resizeTimer = setTimeout(() => {
           resizeTimer = null;
-          const size = fit.proposeDimensions();
-          if (size) sendSize(size);
+          applySize();
         }, RESIZE_DEBOUNCE_MS);
       };
       const observer = new ResizeObserver(scheduleSize);
@@ -310,11 +347,12 @@ export function TerminalPanel({
       // the only way to see the guard's status — EventSource cannot read a
       // response status, so a panel built on it would sit blank forever on the
       // very install that needs the guidance most.
-      const size = fit.proposeDimensions();
+      // The measurement taken before the first fit above: the host is sized by the
+      // flex layout, so fitting it cannot change what a later measure would read.
       const query = new URLSearchParams({ cwd });
-      if (size) {
-        query.set("cols", String(size.cols));
-        query.set("rows", String(size.rows));
+      if (openSize) {
+        query.set("cols", String(openSize.cols));
+        query.set("rows", String(openSize.rows));
       }
       const response = await fetch(`/api/terminal/stream?${query.toString()}`, {
         signal: abort.signal,
