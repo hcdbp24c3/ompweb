@@ -29,6 +29,10 @@ export interface SpawnOptions {
 
 export type SpawnPty = (opts: SpawnOptions) => PtyLike;
 
+/** The shape of the real spawner. Kept separate from SpawnPty because node-pty
+ *  can only be imported dynamically, so the real one cannot be synchronous. */
+export type AsyncSpawnPty = (opts: SpawnOptions) => Promise<PtyLike>;
+
 export interface TerminalHandle {
   write(data: string): void;
   resize(cols: number, rows: number): void;
@@ -42,7 +46,12 @@ export interface TerminalHandle {
 export interface RegistryLimits {
   idleMs: number;
   maxTerminals: number;
-  scrollbackLines: number;
+  /** Retained onData *chunks*, not lines: node-pty's chunking is not line
+   *  aligned, and replay() must reproduce the shell's byte stream exactly, so
+   *  cutting at real line boundaries would need a partial-line buffer that can
+   *  only approximate the cut. The xterm.js client holds its own visual
+   *  scrollback; this ring only has to be a bounded tail. */
+  scrollbackChunks: number;
 }
 
 export interface PtyRegistry {
@@ -65,7 +74,7 @@ const DEFAULT_LIMITS: RegistryLimits = {
   // process do not have visibly different lifetimes.
   idleMs: 300_000,
   maxTerminals: 4,
-  scrollbackLines: 2000,
+  scrollbackChunks: 2000,
 };
 
 /** Login shells that exist on both Linux and macOS hosts. */
@@ -116,7 +125,7 @@ export function createPtyRegistry(
   spawn: SpawnPty,
   limits: Partial<RegistryLimits> = {},
 ): PtyRegistry {
-  const { idleMs, maxTerminals, scrollbackLines } = { ...DEFAULT_LIMITS, ...limits };
+  const { idleMs, maxTerminals, scrollbackChunks } = { ...DEFAULT_LIMITS, ...limits };
   const entries = new Map<string, Entry>();
 
   function clearIdle(entry: Entry) {
@@ -126,11 +135,17 @@ export function createPtyRegistry(
     }
   }
 
-  function dispose(cwd: string, kill: boolean) {
-    const entry = entries.get(cwd);
-    if (!entry) return;
+  /**
+   * Retires `entry`, killing its shell only when asked.
+   *
+   * Identity-aware on purpose: a handle outlives the shell it was minted for, and
+   * a shell's onExit can fire after its replacement has already taken the cwd.
+   * Keying disposal on the cwd alone would let a stale handle kill — or a dead
+   * shell's late exit evict — the replacement the user never asked to lose.
+   */
+  function dispose(cwd: string, entry: Entry, kill: boolean) {
     clearIdle(entry);
-    entries.delete(cwd);
+    if (entries.get(cwd) === entry) entries.delete(cwd);
     entry.live = false;
     if (kill) {
       try {
@@ -143,7 +158,7 @@ export function createPtyRegistry(
 
   function armIdle(cwd: string, entry: Entry) {
     clearIdle(entry);
-    entry.idleTimer = setTimeout(() => dispose(cwd, true), idleMs);
+    entry.idleTimer = setTimeout(() => dispose(cwd, entry, true), idleMs);
     // Never hold the process open just for an idle shell.
     entry.idleTimer.unref?.();
   }
@@ -184,13 +199,13 @@ export function createPtyRegistry(
 
     pty.onData((data) => {
       entry.scrollback.push(data);
-      while (entry.scrollback.length > scrollbackLines) entry.scrollback.shift();
+      while (entry.scrollback.length > scrollbackChunks) entry.scrollback.shift();
       for (const listener of entry.listeners) listener(data);
     });
     pty.onExit(() => {
       // The shell ended on its own (`exit`, Ctrl-D): drop the entry so the next
       // attach spawns a fresh one instead of writing into a corpse.
-      dispose(cwd, false);
+      dispose(cwd, entry, false);
     });
 
     armIdle(cwd, entry);
@@ -206,7 +221,7 @@ export function createPtyRegistry(
             entry.pty.write(data);
           } catch {
             // The shell died between the liveness check and the write.
-            dispose(cwd, false);
+            dispose(cwd, entry, false);
           }
         },
         resize(cols, rows) {
@@ -214,11 +229,11 @@ export function createPtyRegistry(
           try {
             entry.pty.resize(cols, rows);
           } catch {
-            dispose(cwd, false);
+            dispose(cwd, entry, false);
           }
         },
         kill() {
-          dispose(cwd, true);
+          dispose(cwd, entry, true);
         },
         replay() {
           return entry.scrollback.join("");
@@ -241,7 +256,7 @@ export function createPtyRegistry(
       if (entry) armIdle(cwd, entry);
     },
     disposeAll() {
-      for (const cwd of [...entries.keys()]) dispose(cwd, true);
+      for (const [cwd, entry] of [...entries]) dispose(cwd, entry, true);
     },
     count: () => entries.size,
     activeCwds: () => [...entries.keys()],
@@ -253,30 +268,53 @@ declare global {
 }
 
 /**
- * Bridges the async default spawner into the synchronous SpawnPty shape.
+ * Bridges the async real spawner into the synchronous SpawnPty shape.
  *
  * node-pty can only be imported dynamically, so the real process does not exist
- * on the first synchronous tick. Writes that arrive in that window are queued
- * and flushed once it does — a keystroke typed the instant the panel opens must
- * not be dropped.
+ * on the first synchronous tick. Two things must survive that window, and both
+ * are easy to drop because the handle exists before the process does:
+ *
+ *  - a keystroke typed the instant the panel opens (queued and flushed on arrival),
+ *  - a kill issued in the same window (remembered, and applied on arrival — an
+ *    unreaped kill here leaves a shell nobody holds a reference to, alive until
+ *    the container restarts).
+ *
+ * The spawner is a parameter so a test can drive the window without the native
+ * build; production passes nothing and gets defaultPtySpawner.
  */
-function asyncSpawnerBridge(): SpawnPty {
+export function asyncSpawnerBridge(spawnReal: AsyncSpawnPty = defaultPtySpawner): SpawnPty {
   return (opts) => {
     const queue: string[] = [];
     const dataCbs: ((chunk: string) => void)[] = [];
     const exitCbs: ((code: number) => void)[] = [];
     let pty: PtyLike | null = null;
     let exited = false;
+    let killRequested = false;
 
-    void defaultPtySpawner(opts).then((real) => {
-      pty = real;
-      real.onData((data) => { for (const cb of dataCbs) cb(data); });
-      real.onExit((code) => {
-        exited = true;
-        for (const cb of exitCbs) cb(code);
-      });
-      for (const data of queue.splice(0)) real.write(data);
-    });
+    const finish = (code: number) => {
+      exited = true;
+      for (const cb of exitCbs) cb(code);
+    };
+
+    void spawnReal(opts).then(
+      (real) => {
+        pty = real;
+        real.onData((data) => { for (const cb of dataCbs) cb(data); });
+        real.onExit(finish);
+        if (killRequested) {
+          real.kill();
+        } else {
+          for (const data of queue.splice(0)) real.write(data);
+        }
+      },
+      () => {
+        // A spawn that cannot happen (missing native build, bad cwd) must look
+        // like a shell that exited, so the registry drops the entry the same way.
+        // Letting the rejection go unhandled would be worse: Node >=15 exits the
+        // process on it, losing every other session over one broken terminal.
+        finish(1);
+      },
+    );
 
     return {
       write(data) {
@@ -287,6 +325,7 @@ function asyncSpawnerBridge(): SpawnPty {
         pty?.resize(cols, rows);
       },
       kill() {
+        killRequested = true;
         pty?.kill();
       },
       onData(cb) {
