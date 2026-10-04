@@ -5,6 +5,7 @@ import { NextResponse } from "next/server";
 import { apiErrorResponse } from "@/lib/api-utils";
 import { cloneDirectoryName } from "@/lib/git-clone";
 import { ProjectPathError, validateProjectPath } from "@/lib/project-registry";
+import { hostChildEnv } from "@/lib/project-command-env";
 
 // In-flight clones by client-chosen id, so DELETE can cancel one while its
 // POST stream stays open to report the cleanup.
@@ -30,7 +31,7 @@ function runGitClone(url: string, target: string, signal: AbortSignal, onOutput:
   const child = spawn("git", ["clone", "--progress", "--", url, target], {
     stdio: ["ignore", "pipe", "pipe"],
     // An empty GIT_ASKPASS also overrides core.askPass/SSH_ASKPASS fallbacks.
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS: "", GIT_ALLOW_PROTOCOL: "https:ssh" },
+    env: hostChildEnv({ GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS: "", GIT_ALLOW_PROTOCOL: "https:ssh" }),
     detached: process.platform !== "win32",
     windowsHide: true,
   });

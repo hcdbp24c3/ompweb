@@ -11,6 +11,7 @@ import {
   isWindowsAbsolutePath,
 } from "@/lib/file-access";
 import { buildEntriesFromFiles, filterFileEntries, parseResultLimit, type FileIndexEntry } from "@/lib/file-fuzzy";
+import { hostChildEnv } from "@/lib/project-command-env";
 
 const execFileAsync = promisify(execFile);
 
@@ -84,7 +85,7 @@ async function listWithGit(cwd: string): Promise<FileListing | null> {
     const gitOptions = {
       timeout: 10_000,
       maxBuffer: 64 * 1024 * 1024,
-      env: { ...process.env, LC_ALL: "C" },
+      env: hostChildEnv({ LC_ALL: "C" }),
     };
     // --cached lists index entries, including files already removed from the
     // working tree. Those would show up as results that 404 the moment anyone

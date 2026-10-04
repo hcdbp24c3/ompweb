@@ -1,5 +1,6 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { hostChildEnv } from "./project-command-env";
 
 const execFileAsync = promisify(execFile);
 
@@ -69,7 +70,7 @@ export async function resolveGithubRepo(cwd: string): Promise<string | null> {
     const { stdout } = await execFileAsync(
       "git",
       ["-C", cwd, "config", "--get-regexp", "^(remote\\..*\\.(url|gh-resolved)|url\\..*\\.insteadof)$"],
-      { timeout: 5_000, env: { ...process.env, LC_ALL: "C" } },
+      { timeout: 5_000, env: hostChildEnv({ LC_ALL: "C" }) },
     );
     return pickGithubRepo(stdout);
   } catch {
