@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { RefreshCw, Terminal as TerminalIcon } from "lucide-react";
+import { RefreshCw, Square, Terminal as TerminalIcon } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
 import { useTheme } from "@/hooks/useTheme";
 
 const INPUT_PATH = "/api/terminal/input";
+const CLOSE_PATH = "/api/terminal/close";
 
 /** A window drag fires the ResizeObserver dozens of times and the shell only
  *  needs the size it ends up at, so resizes are trailing-edge debounced. */
@@ -26,7 +27,6 @@ export interface TerminalPanelProps {
   emptyMessage?: string;
   /** Shown when the server refuses for lack of a web password (503). */
   authRequiredMessage?: string;
-  onAuthRequired?: () => void;
   /** Supplies the xterm classes. Defaults to the dynamic import; tests pass a
    *  fake because assigning globalThis cannot intercept an ESM import, and the
    *  packages land in the dependency task. */
@@ -75,17 +75,22 @@ async function defaultTerminalLoader(): Promise<TerminalClasses> {
  * frame means: the name is never looked at. Comment lines (`:keepalive`) carry
  * nothing, several `data:` lines join per the SSE spec, and a frame split
  * across two chunks stays in `rest` until its remainder arrives.
+ *
+ * Line endings follow the SSE spec, which allows CR, LF *or* CRLF; the route
+ * itself writes LF, and a proxy in front of it is free to rewrite the rest.
  */
 export function splitSseFrames(buffer: string): { frames: string[]; rest: string } {
   const frames: string[] = [];
   let rest = buffer;
   for (;;) {
-    const boundary = /\r?\n\r?\n/.exec(rest);
+    const boundary = /(?:\r\n|\r|\n){2}/.exec(rest);
     if (!boundary) break;
     const data = rest
       .slice(0, boundary.index)
-      .split(/\r?\n/)
+      .split(/\r\n|\r|\n/)
       .filter((line) => line.startsWith("data:"))
+      // One optional leading space is part of the framing, not the payload, and
+      // `data:` with none keeps everything after the colon.
       .map((line) => line.slice(5).replace(/^ /, ""))
       .join("\n");
     rest = rest.slice(boundary.index + boundary[0].length);
@@ -118,6 +123,17 @@ function xtermFontFamily(): string | undefined {
   return getComputedStyle(document.documentElement).getPropertyValue("--font-mono").trim() || undefined;
 }
 
+/** xterm's fontSize is a canvas font size, so it has to be a number: the token is
+ *  resolved and parsed rather than handed over as a `var()` string. `undefined`
+ *  when the document cannot answer, and the caller then omits the key entirely —
+ *  see the options note below. */
+function xtermFontSize(): number | undefined {
+  const value = getComputedStyle(document.documentElement).getPropertyValue("--text-sm").trim();
+  if (!value) return undefined;
+  const size = Number.parseFloat(value);
+  return Number.isFinite(size) ? size : undefined;
+}
+
 async function readFailure(response: Response): Promise<{ authRequired: boolean; message: string }> {
   let message = `HTTP ${response.status}`;
   let authRequired = false;
@@ -135,7 +151,6 @@ export function TerminalPanel({
   cwd,
   emptyMessage,
   authRequiredMessage,
-  onAuthRequired,
   loadTerminal,
 }: TerminalPanelProps) {
   const { t } = useI18n();
@@ -144,17 +159,20 @@ export function TerminalPanel({
   const termRef = useRef<XtermInstance | null>(null);
   const [outcome, setOutcome] = useState<PanelOutcome>(null);
   const [restartKey, setRestartKey] = useState(0);
+  const [stopping, setStopping] = useState(false);
   const authRequired = outcome?.kind === "auth_required";
+
+  // Re-entrancy is refused from a ref rather than from `stopping` state: two
+  // clicks in one tick would both read the same render's `false`.
+  const stoppingRef = useRef(false);
 
   // Read through refs so connecting does not depend on these props' identity: an
   // inline arrow from the parent would otherwise reconnect the shell on every
   // parent render.
   const loaderRef = useRef(loadTerminal);
-  const onAuthRequiredRef = useRef(onAuthRequired);
   useEffect(() => {
     loaderRef.current = loadTerminal;
-    onAuthRequiredRef.current = onAuthRequired;
-  }, [loadTerminal, onAuthRequired]);
+  }, [loadTerminal]);
 
   const post = useCallback(async (path: string, body: Record<string, unknown>): Promise<void> => {
     const response = await fetch(path, {
@@ -165,12 +183,38 @@ export function TerminalPanel({
     if (response.ok) return;
     const failure = await readFailure(response);
     if (failure.authRequired) {
-      onAuthRequiredRef.current?.();
       setOutcome({ kind: "auth_required" });
       return;
     }
     throw new Error(failure.message);
   }, []);
+
+  /**
+   * Kills the shell now. Idle reaping cannot do it while this panel holds a
+   * listener, and a visited right-panel view is never unmounted, so without an
+   * explicit control the shell would live until the workspace changed or the
+   * server restarted. The restart then gives the panel a stream of its own
+   * rather than leaving it holding a listener to the pty that was just killed.
+   */
+  const stopShell = useCallback(async (): Promise<void> => {
+    if (!cwd || stoppingRef.current) return;
+    stoppingRef.current = true;
+    setStopping(true);
+    try {
+      await fetch(CLOSE_PATH, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd }),
+      });
+    } catch {
+      // An unreachable shell or a dropped connection: close is idempotent, and the
+      // restart below leaves the panel consistent either way.
+    } finally {
+      stoppingRef.current = false;
+      setStopping(false);
+      setRestartKey((value) => value + 1);
+    }
+  }, [cwd]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -194,16 +238,18 @@ export function TerminalPanel({
       if (cancelled) return;
 
       const fontFamily = xtermFontFamily();
+      const fontSize = xtermFontSize();
       const options: Record<string, unknown> = {
         convertEol: true,
-        fontSize: 12,
         cursorBlink: true,
         scrollback: 2000,
         theme: xtermTheme(),
       };
-      // Not defaulted: an explicit undefined would override xterm's own font
-      // stack with a broken canvas font string, and every column would measure wrong.
+      // Neither is defaulted: an explicit undefined would override xterm's own
+      // font stack and size with a broken canvas font string, and every column
+      // would measure wrong.
       if (fontFamily) options.fontFamily = fontFamily;
+      if (fontSize !== undefined) options.fontSize = fontSize;
 
       const term = new (Terminal as new (opts: Record<string, unknown>) => XtermInstance)(options);
       const fit = new (FitAddon as new () => FitAddonInstance)();
@@ -280,7 +326,6 @@ export function TerminalPanel({
         dispose();
         teardown = null;
         if (failure.authRequired) {
-          onAuthRequiredRef.current?.();
           setOutcome({ kind: "auth_required" });
           return;
         }
@@ -374,6 +419,22 @@ export function TerminalPanel({
         <div style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.6, maxWidth: 380 }}>
           {t("terminal.authRequiredHint")}
         </div>
+        <button
+          type="button"
+          onClick={() => setOutcome(null)}
+          style={{
+            marginTop: 4,
+            padding: "3px 10px",
+            fontSize: 11,
+            color: "var(--text-muted)",
+            background: "none",
+            border: "1px solid var(--border)",
+            borderRadius: "var(--radius-control)",
+            cursor: "pointer",
+          }}
+        >
+          {t("terminal.tryAgain")}
+        </button>
       </div>
     );
   }
@@ -385,6 +446,9 @@ export function TerminalPanel({
       : outcome?.kind === "error"
         ? outcome.message
         : null;
+  // One banner, three outcomes: only a refusal is an error. The other two report
+  // that the shell is gone, which is not something to colour as a failure.
+  const bannerTone = outcome?.kind === "error" ? "var(--status-error)" : "var(--text-muted)";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "var(--bg-panel)" }}>
@@ -397,7 +461,7 @@ export function TerminalPanel({
             gap: 8,
             padding: "3px 6px 3px 8px",
             fontSize: 11,
-            color: "var(--text-muted)",
+            color: bannerTone,
             borderBottom: "1px solid var(--border)",
             flexShrink: 0,
           }}
@@ -432,6 +496,41 @@ export function TerminalPanel({
         </div>
       )}
       <div ref={hostRef} style={{ flex: 1, minHeight: 0, padding: 6 }} />
+      {/* Always visible rather than inside the failure banner: the banner only
+        renders once the shell is already gone, which is the one moment the close
+        route has nothing left to kill. */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "flex-end",
+          gap: 8,
+          padding: "3px 6px",
+          borderTop: "1px solid var(--border)",
+          flexShrink: 0,
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => { void stopShell(); }}
+          disabled={stopping}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 5,
+            padding: "2px 8px",
+            fontSize: 11,
+            color: "var(--text-dim)",
+            background: "none",
+            border: "1px solid var(--border)",
+            borderRadius: "var(--radius-control)",
+            cursor: stopping ? "default" : "pointer",
+          }}
+        >
+          <Square size={11} strokeWidth={2} aria-hidden="true" />
+          {t("terminal.stopShell")}
+        </button>
+      </div>
     </div>
   );
 }

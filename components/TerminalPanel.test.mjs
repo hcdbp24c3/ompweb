@@ -39,6 +39,8 @@ function fakeStream() {
     emit(payload) { controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`)); },
     /** Deliver raw stream bytes, for frames the route does not write as-is. */
     raw(text) { controller.enqueue(encoder.encode(text)); },
+    /** Deliver bytes verbatim, to cut a multi-byte character in half. */
+    rawBytes(bytes) { controller.enqueue(Uint8Array.from(bytes)); },
     /** What the server does once a shell exits. */
     end() { closed = true; controller.close(); },
   };
@@ -90,7 +92,27 @@ function termKit({ cols = 80, rows = 24 } = {}) {
   };
 }
 
+const realGetComputedStyle = globalThis.getComputedStyle;
+
+/**
+ * jsdom answers "" for every custom property, so the panel's token path would
+ * never run in a test — `xtermTheme()` would always be `{}` and every assertion
+ * about it vacuous. Delegating to the real implementation keeps React and the DOM
+ * working while only the named tokens are answered.
+ */
+function stubTokens(tokens) {
+  globalThis.getComputedStyle = (element, pseudo) => {
+    const styles = realGetComputedStyle(element, pseudo);
+    return {
+      getPropertyValue(name) {
+        return Object.hasOwn(tokens, name) ? tokens[name] : styles.getPropertyValue(name);
+      },
+    };
+  };
+}
+
 beforeEach(() => {
+  globalThis.getComputedStyle = realGetComputedStyle;
   posts.length = 0;
   streams.length = 0;
   observers.length = 0;
@@ -111,6 +133,25 @@ afterEach(cleanup);
 
 const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 20)); });
 
+/**
+ * Deliver each part as its own read, so a chunk boundary really falls between
+ * them. Without the settle between parts a single reader could be handed both
+ * enqueues at once and the test would prove nothing about threading.
+ */
+async function sendChunks(...parts) {
+  for (const part of parts) {
+    await act(async () => { streams[0].source.raw(part); });
+    await settle();
+  }
+}
+
+async function sendByteChunks(...parts) {
+  for (const part of parts) {
+    await act(async () => { streams[0].source.rawBytes(part); });
+    await settle();
+  }
+}
+
 test("an empty cwd shows the message instead of a dead terminal", async () => {
   render(React.createElement(TerminalPanel, { cwd: null, emptyMessage: "Pick a workspace first" }));
   assert.ok(screen.getByText("Pick a workspace first"));
@@ -123,8 +164,29 @@ test("opening the panel asks for the cwd's stream and never for a shell kill", a
   await settle();
   assert.equal(streams.length, 1, "one stream for the cwd");
   assert.match(streams[0].url, /\/api\/terminal\/stream\?cwd=%2Frepo/);
-  assert.equal(posts.filter((p) => p.url.includes("/close")).length, 0,
+  // The stop control exists, so "no kill on open" is a claim about a control that
+  // really is on screen and not an assertion about nothing.
+  assert.ok(screen.getByRole("button", { name: "Stop shell" }), "the stop control is always visible");
+  assert.equal(posts.filter((p) => p.url.includes("/api/terminal/close")).length, 0,
     "opening a tab must not kill the shell it is about to use");
+});
+
+test("stopping the shell posts the cwd to /close once and reconnects", async () => {
+  // Idle reaping cannot fire while the panel holds a listener, and the right panel
+  // never unmounts a visited view — so without this control the only ways to end
+  // a shell are a workspace change or a server restart.
+  const kit = termKit();
+  render(React.createElement(TerminalPanel, { cwd: "/repo", loadTerminal: kit.loadTerminal }));
+  await settle();
+  const stop = screen.getByRole("button", { name: "Stop shell" });
+
+  await act(async () => { fireEvent.click(stop); fireEvent.click(stop); });
+  await settle();
+
+  const stops = posts.filter((p) => p.url.includes("/api/terminal/close"));
+  assert.equal(stops.length, 1, "a double click must not kill two shells or re-post");
+  assert.deepEqual(stops[0].body, { cwd: "/repo" });
+  assert.equal(streams.length, 2, "the panel reconnects instead of watching the shell it just killed");
 });
 
 test("a replay frame and a later output frame are both delivered verbatim", async () => {
@@ -153,6 +215,140 @@ test("the payload's type selects the frame, so an SSE event name cannot change i
     streams[0].source.raw('event: custom\ndata: {"type":"output","data":"$ "}\n\n');
   });
   assert.deepEqual(kit.written, ["$ "]);
+});
+
+test("a frame split across two chunks reaches the terminal intact", async () => {
+  // The panel has to thread the parser's `rest` into the next read. A panel that
+  // reset its buffer instead would silently drop every frame straddling a chunk
+  // boundary — which any output longer than one TCP read produces — and the
+  // symptom is shell output missing its middle, not an error.
+  const kit = termKit();
+  render(React.createElement(TerminalPanel, { cwd: "/repo", loadTerminal: kit.loadTerminal }));
+  await settle();
+
+  await sendChunks('data: {"type":"out');
+  assert.deepEqual(kit.written, [], "half a frame is not written out as a broken one");
+  await sendChunks('put","data":"split"}\n\n');
+  assert.deepEqual(kit.written, ["split"]);
+});
+
+test("a keepalive comment sharing a chunk with a real frame does not swallow it", async () => {
+  // The route heartbeats every idle period, so a comment and a frame routinely
+  // land in one read. Consuming the whole chunk as one frame would eat the frame.
+  const kit = termKit();
+  render(React.createElement(TerminalPanel, { cwd: "/repo", loadTerminal: kit.loadTerminal }));
+  await settle();
+
+  await sendChunks(':keepalive\n\ndata: {"type":"output","data":"after"}\n\n');
+  assert.deepEqual(kit.written, ["after"]);
+});
+
+test("CRLF and bare CR frame terminators are both accepted", async () => {
+  // SSE allows CR, LF or CRLF. The route writes LF, but a proxy in front of it is
+  // free to rewrite the endings, and a parser that only knows LF drops every frame
+  // on such a connection — with no error, just a dead terminal.
+  const kit = termKit();
+  render(React.createElement(TerminalPanel, { cwd: "/repo", loadTerminal: kit.loadTerminal }));
+  await settle();
+
+  await sendChunks('data: {"type":"output","data":"crlf"}\r\n\r\n');
+  assert.deepEqual(kit.written, ["crlf"], "CRLF terminator");
+  await sendChunks('data: {"type":"output","data":"cr"}\r\r');
+  assert.deepEqual(kit.written, ["crlf", "cr"], "bare CR terminator");
+});
+
+test("a data line with no space after the colon keeps its whole payload", async () => {
+  // Only one space is optional framing. Dropping a fixed six bytes instead would
+  // take the payload's first character and the frame would parse as nothing.
+  const kit = termKit();
+  render(React.createElement(TerminalPanel, { cwd: "/repo", loadTerminal: kit.loadTerminal }));
+  await settle();
+
+  await sendChunks('data:{"type":"output","data":"tight"}\n\n');
+  assert.deepEqual(kit.written, ["tight"]);
+});
+
+test("a multi-byte character split across two chunks is not corrupted", async () => {
+  // Output is chunked at byte boundaries, not character boundaries. Decoding each
+  // chunk on its own turns a split `€` into U+FFFD, so the decoder has to be
+  // streaming — the panel's buffer is already a string, so only `decode(value,
+  // { stream: true })` keeps the half character back for the next chunk.
+  const kit = termKit();
+  render(React.createElement(TerminalPanel, { cwd: "/repo", loadTerminal: kit.loadTerminal }));
+  await settle();
+
+  const frame = encoder.encode('data: {"type":"output","data":"€✓"}\n\n');
+  const euroAt = frame.indexOf(0xe2);
+  // € is 0xe2 0x82 0xac; cut between its second and third byte.
+  await sendByteChunks(frame.slice(0, euroAt + 2), frame.slice(euroAt + 2));
+  assert.deepEqual(kit.written, ["€✓"]);
+});
+
+test("xterm is given resolved token values, and an absent token leaves its key out", async () => {
+  // xterm paints through canvas fillStyle and font strings, and neither resolves
+  // `var(--token)`. A theme of literal `var(--bg-panel)` strings is an invalid
+  // fillStyle, so the values have to come from the document — and a token the
+  // document cannot answer has to be left out, not filled with the var() text.
+  stubTokens({
+    "--bg-panel": "#101010",
+    "--text": "#f0f0f0",
+    "--font-mono": "Fira Mono",
+    "--text-sm": "14px",
+  });
+  const kit = termKit();
+  render(React.createElement(TerminalPanel, { cwd: "/repo", loadTerminal: kit.loadTerminal }));
+  await settle();
+
+  const options = kit.created[0].options;
+  // `--accent` and `--bg-selected` are deliberately absent from the stub.
+  assert.deepEqual(options.theme, { background: "#101010", foreground: "#f0f0f0" });
+  assert.equal(options.fontFamily, "Fira Mono");
+  assert.equal(options.fontSize, 14, "the size comes from the --text-sm token, not from a literal");
+});
+
+test("a token the document cannot answer leaves xterm's own default alone", async () => {
+  // Setting a key to a value we could not resolve is worse than not setting it:
+  // an explicit undefined fontSize overrides xterm's default with NaN, and then
+  // every column measures wrong and the resize posts are all garbage.
+  const kit = termKit();
+  render(React.createElement(TerminalPanel, { cwd: "/repo", loadTerminal: kit.loadTerminal }));
+  await settle();
+
+  const options = kit.created[0].options;
+  assert.deepEqual(options.theme, {});
+  assert.equal("fontFamily" in options, false);
+  assert.equal("fontSize" in options, false);
+});
+
+test("a refused keystroke is shown in the error token, not as neutral text", async () => {
+  // The banner carries three outcomes. Only a server refusal is an error; colouring
+  // it like the "the shell exited" notice would leave the user with no way to tell
+  // a dead server from a dead shell.
+  const passthrough = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    if (init?.method === "POST") {
+      return new Response(JSON.stringify({ error: "stream_write_failed" }), { status: 500 });
+    }
+    return passthrough(url, init);
+  };
+  const kit = termKit();
+  render(React.createElement(TerminalPanel, { cwd: "/repo", loadTerminal: kit.loadTerminal }));
+  await settle();
+  await act(async () => { kit.type("x"); });
+  await settle();
+
+  assert.equal(screen.getByRole("alert").textContent, "stream_write_failed");
+  assert.equal(screen.getByRole("alert").style.color, "var(--status-error)");
+});
+
+test("an ended-shell notice stays neutral text", async () => {
+  const kit = termKit();
+  render(React.createElement(TerminalPanel, { cwd: "/repo", loadTerminal: kit.loadTerminal }));
+  await settle();
+  await act(async () => { streams[0].source.emit({ type: "exit", data: "" }); });
+  await settle();
+
+  assert.equal(screen.getByRole("alert").style.color, "var(--text-muted)");
 });
 
 test("an exit frame ends the shell instead of leaving a terminal that silently drops keys", async () => {
@@ -216,18 +412,60 @@ test("a 503 tells the user to set a web password and is not retried", async () =
     return new Response(JSON.stringify({ error: "no password", code: "terminal_auth_required" }), { status: 503 });
   };
   const kit = termKit();
-  let authNotified = 0;
   render(React.createElement(TerminalPanel, {
     cwd: "/repo",
     authRequiredMessage: "Set OMP_WEB_PASSWORD",
-    onAuthRequired: () => { authNotified += 1; },
     loadTerminal: kit.loadTerminal,
   }));
   await settle();
   assert.ok(screen.getByText("Set OMP_WEB_PASSWORD"));
-  assert.equal(authNotified, 1, "the host is told once, so it can open the password prompt");
   assert.equal(calls, 1, "the answer will not change on a retry");
   assert.equal(kit.created[0].disposed, true, "the terminal that was built to measure the shell is disposed");
+});
+
+test("the auth guidance offers a retry, so it is not a dead end", async () => {
+  // The refusal is about this server start, not about the user: the password may
+  // already be set, or the panel may simply have been mounted while the guard was
+  // mid-restart. A screen with no way back would leave the terminal unusable until
+  // the whole page was reloaded.
+  const passthrough = globalThis.fetch;
+  let refused = true;
+  globalThis.fetch = async (url, init) => {
+    if (refused) {
+      return new Response(JSON.stringify({ error: "no password", code: "terminal_auth_required" }), { status: 503 });
+    }
+    return passthrough(url, init);
+  };
+  const kit = termKit();
+  render(React.createElement(TerminalPanel, { cwd: "/repo", loadTerminal: kit.loadTerminal }));
+  await settle();
+  assert.ok(screen.getByText("The terminal requires a web password"));
+  assert.equal(streams.length, 0, "the refused attempt opened no stream");
+  // No stop control on this screen, deliberately: /close runs the same guard, so
+  // it answers 503 here too and could not kill anything.
+  assert.equal(screen.queryByRole("button", { name: "Stop shell" }), null);
+
+  refused = false;
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Try again" })); });
+  await settle();
+  assert.equal(streams.length, 1, "the retry reconnects instead of leaving the guidance up");
+  assert.match(streams[0].url, /cwd=%2Frepo/);
+});
+
+test("the auth hint shows no literal backticks around the variable name", async () => {
+  // The hint is rendered as a plain <div>, not as markdown, so the backticks that
+  // mark up `OMP_WEB_PASSWORD` in the locale file reach the user as themselves.
+  globalThis.fetch = async () => new Response(
+    JSON.stringify({ error: "no password", code: "terminal_auth_required" }),
+    { status: 503 },
+  );
+  const kit = termKit();
+  render(React.createElement(TerminalPanel, { cwd: "/repo", loadTerminal: kit.loadTerminal }));
+  await settle();
+
+  const hint = screen.getByText(/OMP_WEB_PASSWORD/);
+  assert.ok(hint.textContent.includes("OMP_WEB_PASSWORD"));
+  assert.equal(hint.textContent.includes("`"), false, "backticks are markup, and nothing here renders markup");
 });
 
 test("a late auth refusal releases the stream instead of watching a shell it cannot show", async () => {
@@ -253,6 +491,8 @@ test("a late auth refusal releases the stream instead of watching a shell it can
   await settle();
   assert.ok(screen.getByText("Set OMP_WEB_PASSWORD"));
   assert.equal(source.closed, true, "the stream is released, so the shell can be reaped");
+  assert.equal(observers[0].disconnected, true, "the resize observer is released with the stream");
+  assert.equal(kit.created[0].disposed, true, "the terminal is disposed, not left on a host nobody can show");
 });
 
 test("unmounting closes the stream but does not ask the server to kill the shell", async () => {
@@ -260,10 +500,15 @@ test("unmounting closes the stream but does not ask the server to kill the shell
   const view = render(React.createElement(TerminalPanel, { cwd: "/repo", loadTerminal: kit.loadTerminal }));
   await settle();
   const source = streams[0].source;
+  // The control that *does* post a stop request is on screen here, so the zero
+  // below is a claim about this teardown path and not about the panel having no
+  // way to reach the route at all.
+  assert.ok(screen.getByRole("button", { name: "Stop shell" }));
+
   view.unmount();
   await settle();
   assert.equal(source.closed, true, "the stream is closed");
-  assert.equal(posts.filter((p) => p.url.includes("/close")).length, 0,
+  assert.equal(posts.filter((p) => p.url.includes("/api/terminal/close")).length, 0,
     "closing a tab detaches; only an explicit stop kills the shell");
   assert.equal(kit.created[0].disposed, true, "the xterm instance is disposed with the panel");
 });
