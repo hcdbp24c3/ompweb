@@ -5,6 +5,9 @@ import { guardTerminalCwd } from "@/lib/terminal/guard";
 export const dynamic = "force-dynamic";
 
 const HEARTBEAT_MS = 15_000;
+// Duplicated verbatim in app/api/terminal/input/route.ts — there is no shared
+// constant, so raising one limit without the other means a size this stream
+// happily spawns is refused as a resize with a 400 the user cannot explain.
 const MAX_COLS = 500;
 const MAX_ROWS = 300;
 const DEFAULT_COLS = 80;

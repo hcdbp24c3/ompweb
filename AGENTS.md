@@ -84,6 +84,9 @@ app/api/
   skills/route.ts                 GET/PATCH loaded skills and disable-model-invocation
   skills/install/route.ts         POST install skills through npx skills add
   skills/search/route.ts          GET/POST skills.sh search
+  terminal/stream/route.ts        GET SSE out for a cwd's shell (replay/output/exit)
+  terminal/input/route.ts         POST { cwd, data? } keystrokes | POST { cwd, cols, rows } resize
+  terminal/close/route.ts         POST { cwd } kill the shell now
   worktrees/route.ts              GET/POST/DELETE git worktrees
 
 lib/
@@ -103,6 +106,7 @@ lib/
   rpc-manager.ts       session registry + startRpcSession over RpcProcess
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
   session-resume.ts    running-session list for auto-resume after a restart
+  terminal/            PTY registry, cwd guard, browser-side input queue
   web-settings.ts      omp-web server settings (~/.omp/agent/omp-web-settings.json)
   skills-service.ts    pure-Node skill discovery mirroring omp's providers
   tool-presets.ts      PRESET_NONE/DEFAULT/FULL + getToolNamesForPreset()
@@ -133,6 +137,7 @@ components/
   FileViewer.tsx      file content in a tab
   GhostMirror.tsx     textarea overlay painting ghost-text word completion
   TabBar.tsx          tab bar (Chat + open file tabs)
+  TerminalPanel.tsx   xterm.js shell panel (pinned right-panel tab, SSE + POST)
   ui/                 shared primitives: Dialog/Tooltip/Collapsible, fields, toast
 
 hooks/
@@ -323,6 +328,48 @@ handled or safely ignored.
 ### File access allow-list
 - `/api/files` is intentionally not a general filesystem browser. Allowed roots come from session cwds, their resolved project roots, `~/omp-cwd-*`, and roots explicitly added with `allowFileRoot()`.
 - `/api/cwd/validate`, `/api/default-cwd`, and `/api/worktrees` call `allowFileRoot()` when they make a new location browsable.
+
+### In-browser terminal (`lib/terminal/`, `/api/terminal/*`, `components/TerminalPanel.tsx`)
+- Transport is SSE out (`/api/terminal/stream`) plus POST in
+  (`/api/terminal/input`, `/api/terminal/close`). No WebSocket: `bin/omp-web.js`
+  runs plain `next start`, so nothing handles an HTTP `Upgrade`.
+- **Never POST a keystroke outside `lib/terminal/input-queue.ts`.** The queue
+  holds one request in flight and coalesces the tail into it, because the input
+  route writes `data` into the pty as each request *arrives*: one un-awaited
+  `fetch` per character delivered them in completion order, measured as
+  `stty size` typed at speed running as `tyst`.
+- **Teardown drops the queue rather than flushing it**, because the input route
+  *attaches* — it spawns a shell for a cwd that is not live, so a flush would
+  leave one running that nothing is watching.
+- **A keystroke must not outlive the stream.** `onData` refuses to post once
+  `shellEnded` is set, and every *clean* end of the stream sets it: the `exit`
+  frame, and a read loop that returns. A banner is not the guard. Known limit: a
+  mid-stream read that *throws* (a dropped socket, `reader.read()` rejecting)
+  reaches the `error` banner with the queue still live — fix that with the same
+  flag, never by refusing on `error` as a whole, because one refused request also
+  sets `error` and the keyboard has to keep working.
+- **The cwd allowlist is a starting-directory restriction, not a jail.**
+  `guardTerminalCwd` bounds where a shell may *start*; a login shell can `cd`
+  anywhere. Do not "fix" this with namespaces or containers.
+- `lib/terminal/guard.ts` is not the authentication check — `proxy.ts` owns the
+  401 — and the two must not be collapsed into one or trusted separately. The
+  guard's own rule is that an instance with no web password gets no shell at all.
+- The registry is keyed on cwd, so **two tabs on the same cwd share one shell**
+  and their keystrokes interleave: watching is multi-tab, typing is not. It lives
+  on a `globalThis` slot for the reason `lib/rpc-manager.ts` does — a module-level
+  `Map` is emptied by a hot reload, orphaning every running shell — and idle
+  reaping only re-arms once the last listener is released.
+- Frames are **unnamed** SSE messages whose payload carries `type` (`replay` /
+  `output` / `exit`); naming them would silence an `EventSource` client. The panel
+  reads the stream with `fetch`, not `EventSource`, because only `fetch` can see
+  the 503 that says a web password is missing. A resize must send `cols` and
+  `rows` together — half a pair is a `400 terminal_size_invalid`.
+- `package.json` pins `node-gyp` in `overrides` on purpose: `node-pty` ships no
+  linux prebuild, so npm compiles it on every install, and its install script
+  invokes the bare name `node-gyp`, which npm resolves through
+  `node_modules/.bin` — where a transitive dependency had hoisted node-gyp 7. A
+  global install loses to that directory, `--ignore-scripts` skips the build
+  entirely, and `npm_config_node_gyp` cannot reach a literal command name.
 
 ### Session list caching — new sessions must appear immediately
 - `listAllSessions()` (sidebar, command palette) is cached twice: a 30s TTL

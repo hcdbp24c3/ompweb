@@ -13,6 +13,9 @@ const MAX_INPUT_REQUEST_BYTES = 256 * 1024;
 // Narrower cap on the `data` field alone: it is what actually reaches a pty
 // write, and it is checked on the parsed value.
 const MAX_INPUT_BYTES = 64 * 1024;
+// Duplicated verbatim in app/api/terminal/stream/route.ts — there is no shared
+// constant, so raising one limit without the other means a shell the stream
+// spawned at that size refuses to be resized to it.
 const MAX_COLS = 500;
 const MAX_ROWS = 300;
 

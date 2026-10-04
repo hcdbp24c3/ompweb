@@ -12,7 +12,11 @@ export type TerminalGuardResult = { cwd: string } | { response: NextResponse };
  * Three checks, and the order matters:
  *   1. password — checked first so an open instance never reaches the
  *      filesystem, and so the user gets an actionable message instead of a
- *      silently dead terminal;
+ *      silently dead terminal. This is *not* authentication: `proxy.ts` owns the
+ *      401 for a wrong password, and this is the separate rule that an instance
+ *      with no web password configured gets no shell at all. Dropping it would
+ *      hand every unconfigured instance a shell, so it must not be merged into
+ *      the proxy's check — nor treated as a substitute for it;
  *   2. allowlist — the same boundary /api/files uses, so the terminal adds no
  *      permission surface;
  *   3. existence — a cwd that vanished must not spawn a shell that fails
