@@ -67,7 +67,7 @@ interface Props {
 }
 
 export interface FileExplorerHandle {
-  openUploadPicker: () => void;
+  openUploadPicker: (target?: string) => void;
   collapseAll: () => void;
 }
 
@@ -254,6 +254,9 @@ interface ExplorerRowProps {
   gitStatusByPath: Map<string, GitFileStatus>;
   changedDirectoryPaths: Set<string>;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
+  /** Opens the upload picker with this folder as the destination. Folders only —
+   *  uploading into a file makes no sense. */
+  onUploadToFolder?: (folderPath: string) => void;
   onActivate: (node: FileNode, index: number) => void;
   onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>, node: FileNode, index: number) => void;
   onFocusRow: (index: number) => void;
@@ -276,6 +279,7 @@ const ExplorerRow = memo(function ExplorerRow({
   gitStatusByPath,
   changedDirectoryPaths,
   onAtMention,
+  onUploadToFolder,
   onActivate,
   onKeyDown,
   onFocusRow,
@@ -301,6 +305,7 @@ const ExplorerRow = memo(function ExplorerRow({
   );
   const mentionLabel = t("fileExplorer.insertPathIntoChat");
   const downloadLabel = t("fileExplorer.downloadFile");
+  const uploadToLabel = (path: string) => t("fileExplorer.uploadToFolder", { path });
 
   return (
     <div
@@ -467,6 +472,39 @@ const ExplorerRow = memo(function ExplorerRow({
           </button>
         </Tooltip>
       )}
+      {node.isDir && onUploadToFolder && (
+        <Tooltip content={uploadToLabel(node.fullPath)}>
+          <button
+            onClick={(e) => {
+              // Without this the row's onActivate toggles the folder open, which
+              // fights the upload the user just asked for.
+              e.stopPropagation();
+              e.preventDefault();
+              onUploadToFolder(node.fullPath);
+            }}
+            aria-label={uploadToLabel(node.name)}
+            style={{
+              flexShrink: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 4,
+              padding: "0 5px",
+              minWidth: 24, height: 24,
+              background: "var(--bg-panel)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-control)",
+              color: "var(--text-muted)",
+              cursor: "pointer",
+              fontSize: 11,
+              fontWeight: 600,
+              transition: `background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)`,
+            }}
+          >
+            <Upload size={11} strokeWidth={2.2} aria-hidden="true" />
+          </button>
+        </Tooltip>
+      )}
       {!node.isDir && (
         <Tooltip content={downloadLabel}>
           <a
@@ -547,6 +585,19 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const searchInputRef = useRef<HTMLInputElement>(null);
   const prevCwdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
+  // Destination of the next upload. Defaults to the workspace root, so the
+  // toolbar button keeps its original whole-workspace meaning; a folder row's
+  // icon sets it to that folder. POST /api/files already accepted nested path
+  // segments — the client only ever sent cwd.
+  const [uploadTarget, setUploadTarget] = useState(cwd);
+  const uploadBusyRef = useRef(false);
+  // Single place that sets the destination and opens the picker, shared by the
+  // per-folder row control and the imperative handle used by the toolbar button.
+  const openUploadPickerAt = useCallback((target?: string) => {
+    setUploadTarget(target ?? cwd);
+    if (uploadBusyRef.current) return;
+    uploadInputRef.current?.click();
+  }, [cwd]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const loadingPathsRef = useRef<Set<string>>(new Set());
   const rootRequestRef = useRef(0);
@@ -557,6 +608,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   // time the panel opens.
   const consumedRefreshTokenRef = useRef<string | null>(null);
   const uploadBusy = uploadPhase !== "idle";
+  uploadBusyRef.current = uploadBusy;
   const searchActive = fileSearchOpen && searchQuery.trim().length > 0;
 
   // Opening the panel focuses the input; closing it resets the whole search,
@@ -865,10 +917,10 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     setUploadSummary({ uploaded, skipped, errors });
 
     if (uploaded.length > 0) {
-      setHighlightedPaths(new Set(uploaded.map((name) => joinFilePath(cwd, name))));
+      setHighlightedPaths(new Set(uploaded.map((name) => joinFilePath(uploadTarget, name))));
       setTreeRefreshKey((key) => key + 1);
     }
-  }, [cwd]);
+  }, [uploadTarget]);
 
   const performUpload = useCallback(async (
     files: File[],
@@ -880,7 +932,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     setUploadPhase("uploading");
 
     try {
-      const { status, data } = await uploadFiles(cwd, files, strategy, setUploadProgress);
+      const { status, data } = await uploadFiles(uploadTarget, files, strategy, setUploadProgress);
       if (status === 409 && data.conflicts?.length) {
         setPendingConflict({
           files,
@@ -899,7 +951,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     } finally {
       setUploadPhase("idle");
     }
-  }, [applyUploadResult, cwd]);
+  }, [applyUploadResult, uploadTarget]);
 
   const prepareUpload = useCallback(async (files: File[]) => {
     if (files.length === 0 || uploadBusy) return;
@@ -912,7 +964,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
 
     try {
       const res = await fetch(
-        `/api/files/${encodeFilePathForApi(cwd)}?type=upload-check`,
+        `/api/files/${encodeFilePathForApi(uploadTarget)}?type=upload-check`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -937,7 +989,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     } finally {
       setUploadPhase("idle");
     }
-  }, [cwd, performUpload, uploadBusy]);
+  }, [uploadTarget, performUpload, uploadBusy]);
 
   const handleUploadInput = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
@@ -946,13 +998,13 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   }, [prepareUpload]);
 
   useImperativeHandle(ref, () => ({
-    openUploadPicker() {
-      if (!uploadBusy) uploadInputRef.current?.click();
+    openUploadPicker(target?: string) {
+      openUploadPickerAt(target);
     },
     collapseAll() {
       setExpandedPaths(new Set());
     },
-  }), [uploadBusy]);
+  }), [openUploadPickerAt]);
 
   useEffect(() => {
     onUploadBusyChange?.(uploadBusy);
@@ -1150,6 +1202,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                 gitStatusByPath={gitStatusByPath}
                 changedDirectoryPaths={changedDirectoryPaths}
                 onAtMention={onAtMention}
+                onUploadToFolder={(folderPath) => openUploadPickerAt(folderPath)}
                 onActivate={handleActivateRow}
                 onKeyDown={handleRowKeyDown}
                 onFocusRow={setFocusedIndex}
