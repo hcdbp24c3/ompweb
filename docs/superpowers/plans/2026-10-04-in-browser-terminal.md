@@ -950,17 +950,6 @@ export async function GET(request: Request) {
 }
 ```
 
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-      "X-Accel-Buffering": "no",
-    },
-  });
-}
-```
-
 - [ ] **Step 5: Write the input route**
 
 Create `app/api/terminal/input/route.ts`:
@@ -1110,7 +1099,17 @@ git commit -m "Add the terminal routes and the guard they share"
 - Test: `components/TerminalPanel.test.mjs`
 
 **Interfaces:**
-- Consumes: the three routes from Task 2. Frame names: `replay` with `{ data, cols, rows }`, `output` with `{ data }`.
+- Consumes: the three routes from Task 2. Frames are unnamed SSE messages whose payload carries `type`:
+  - `replay` with `{ data, cols, rows }` — scrollback from before this client connected
+  - `output` with `{ data }` — live output
+  - `exit` with `{ data: "" }` — the shell is gone; the stream closes after this
+
+  A resize must send `cols` and `rows` **together**: the input route answers 400
+  `terminal_size_invalid` for half a pair, because `resize(cols, undefined)` used
+  to reach node-pty's syscall and its `rows <= 0` check is false for `undefined`.
+  After an `exit` frame the shell is dead and further writes are silent no-ops,
+  which is exactly the frozen-terminal symptom — the panel must show the shell as
+  ended rather than waiting for more frames that will never come.
 - Produces:
   ```ts
   export interface TerminalPanelProps {
@@ -1650,6 +1649,7 @@ Expected: the tab shows the "set OMP_WEB_PASSWORD" guidance and no shell starts.
 git push -u fork feat/terminal
 gh run list -R hcdbp24c3/ompweb --limit 2
 ```
+
 Watch both `build linux/amd64` and `build linux/arm64`. If arm64 fails on the native build, **report before pushing anything else** — a broken arm64 image is worse than a missing terminal.
 
 ---
