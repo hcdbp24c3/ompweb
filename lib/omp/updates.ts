@@ -1,6 +1,7 @@
 import { execFile } from "child_process";
 import { resolveOmpBin, wrapWindowsScript } from "./omp-cli";
 import { isUpdateDisabled } from "../update-policy";
+import { hostChildEnv } from "../project-command-env";
 
 export interface OmpUpdateStatus {
   currentVersion: string | null;
@@ -23,7 +24,7 @@ export function runOmpUpdate(args: string[], timeoutMs = OMP_UPDATE_CHECK_TIMEOU
   execFile(target.file, target.args, {
     timeout: timeoutMs,
     maxBuffer: 1024 * 1024,
-    env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
+    env: hostChildEnv({ FORCE_COLOR: "0", NO_COLOR: "1" }),
     windowsHide: true,
   }, (error, stdout, stderr) => {
     if (error) reject(new Error((stderr || stdout || error.message).trim().slice(-1000)));

@@ -5,6 +5,7 @@ import { promisify } from "util";
 import { allowFileRoot } from "./file-access";
 import { normalizeForComparison, samePath, toNativePath } from "./paths";
 import { loadProjectRegistry } from "./project-registry";
+import { hostChildEnv } from "./project-command-env";
 
 const execFileAsync = promisify(execFile);
 
@@ -66,7 +67,7 @@ async function git(cwd: string, args: string[]): Promise<string> {
     maxBuffer: 1024 * 1024,
     // Pin the message locale so error-text matching (e.g. the dirty-worktree
     // detection in the DELETE route) works regardless of system language.
-    env: { ...process.env, LC_ALL: "C" },
+    env: hostChildEnv({ LC_ALL: "C" }),
   });
   return stdout.trim();
 }

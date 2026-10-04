@@ -17,7 +17,7 @@
 - When `OMP_WEB_PASSWORD` is unset the terminal routes must answer **503 `terminal_auth_required`**. `proxy.ts` answers 401 `password_required` when the password *is* set; both coexist.
 - `RightPanelView` widens to `"explorer" | "git" | "file" | "terminal"`. Do not change the `Tab` interface (`filePath` is required).
 - Idle reaping uses `IDLE_KILL_MS = 300_000` (5 minutes), mirroring `lib/omp/rpc-utility.ts`.
-- Concurrent PTY cap is **4**; scrollback ring buffer is **2000** lines per terminal.
+- Concurrent PTY cap is **4**; the scrollback ring retains the last **2000 output chunks** per terminal. Chunks, not lines: `replay()` feeds bytes straight to xterm.js, and cutting on a line boundary needs a partial-line buffer that still cannot know where a chunk was split.
 - Every API route file needs `export const dynamic = "force-dynamic"`.
 - Locale files are flat dotted-key JSON with **intentional duplicate keys** — never round-trip them through a parser that collapses duplicates. Splice textually and only *parse* to verify. New keys go into all three: `en`, `ja`, `zh-CN`.
 - `RightPanel` keeps visited views mounted (`visitedViews.has(...)`) so switching tabs preserves state; the terminal must do the same or it loses scrollback on every tab switch.
@@ -72,7 +72,7 @@ The only stateful piece, and the only one worth testing hard. Injecting `spawn` 
     kill(): void;
     replay(): string;
   }
-  export interface RegistryLimits { idleMs: number; maxTerminals: number; scrollbackLines: number }
+  export interface RegistryLimits { idleMs: number; maxTerminals: number; scrollbackChunks: number }
   export function createPtyRegistry(spawn: SpawnPty, limits?: Partial<RegistryLimits>): PtyRegistry;
   export interface PtyRegistry {
     attach(cwd: string, cols: number, rows: number): TerminalHandle;
@@ -151,7 +151,7 @@ test("input and resize reach the process", () => {
 });
 
 test("scrollback replays output, and is capped", () => {
-  const { spawned, registry } = harness({ scrollbackLines: 3 });
+  const { spawned, registry } = harness({ scrollbackChunks: 3 });
   const handle = registry.attach("/repo", 80, 24);
   const { dataCb } = spawned[0].pty.state;
   for (const line of ["one", "two", "three", "four"]) dataCb(`${line}\r\n`);
@@ -288,7 +288,7 @@ export interface TerminalHandle {
 export interface RegistryLimits {
   idleMs: number;
   maxTerminals: number;
-  scrollbackLines: number;
+  scrollbackChunks: number;
 }
 
 export interface PtyRegistry {
@@ -311,7 +311,7 @@ const DEFAULT_LIMITS: RegistryLimits = {
   // process do not have visibly different lifetimes.
   idleMs: 300_000,
   maxTerminals: 4,
-  scrollbackLines: 2000,
+  scrollbackChunks: 2000,
 };
 
 /** Login shells that exist on both Linux and macOS hosts. */
@@ -358,7 +358,7 @@ export function createPtyRegistry(
   spawn: SpawnPty,
   limits: Partial<RegistryLimits> = {},
 ): PtyRegistry {
-  const { idleMs, maxTerminals, scrollbackLines } = { ...DEFAULT_LIMITS, ...limits };
+  const { idleMs, maxTerminals, scrollbackChunks } = { ...DEFAULT_LIMITS, ...limits };
   const entries = new Map<string, Entry>();
 
   function clearIdle(entry: Entry) {
@@ -418,7 +418,7 @@ export function createPtyRegistry(
 
     pty.onData((data) => {
       entry.scrollback.push(data);
-      while (entry.scrollback.length > scrollbackLines) entry.scrollback.shift();
+      while (entry.scrollback.length > scrollbackChunks) entry.scrollback.shift();
       for (const listener of entry.listeners) listener(data);
     });
     pty.onExit(() => {

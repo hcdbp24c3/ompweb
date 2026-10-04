@@ -14,6 +14,7 @@ import type {
   PluginScope,
   PluginsResponse,
 } from "@/lib/api-types";
+import { hostChildEnv } from "@/lib/project-command-env";
 
 export const dynamic = "force-dynamic";
 
@@ -93,7 +94,7 @@ function runOmp(
         cwd: opts.cwd,
         timeout: opts.timeout ?? 60_000,
         maxBuffer: 16 * 1024 * 1024,
-        env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
+        env: hostChildEnv({ FORCE_COLOR: "0", NO_COLOR: "1" }),
         windowsHide: true,
       },
       (error, stdout, stderr) => {
