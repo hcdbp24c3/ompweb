@@ -2,6 +2,14 @@
    on Windows, where a parent user-profile package can make the scanner walk
    protected junctions such as "My Documents" during production builds. */
 @import "tailwindcss" source(none);
+
+/* xterm ships no runtime styles. Without this the cursor block, selection
+   highlight and scrollbar are unstyled, which reads as a broken terminal
+   rather than as a missing stylesheet. It lives here rather than in
+   TerminalPanel.tsx because a CSS import inside a component is unloadable
+   by the node test runner, which mounts that component directly.
+   The palette itself still comes from our tokens, via xtermTheme(). */
+@import "@xterm/xterm/css/xterm.css";
 @source inline("data-font-size");
 @source inline("data-ui-scale");
 @source inline("data-touch-targets");

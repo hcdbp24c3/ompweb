@@ -18,11 +18,12 @@ import {
 import { TabBar, type Tab } from "./TabBar";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { GitChangesPanel } from "./GitChangesPanel";
+import { TerminalPanel } from "./TerminalPanel";
 import { FileViewer } from "./FileViewer";
 import { useI18n } from "@/lib/i18n";
 import { getFileName } from "@/lib/file-paths";
 
-export type RightPanelView = "explorer" | "git" | "file";
+export type RightPanelView = "explorer" | "git" | "file" | "terminal";
 
 interface Props {
   fileTabs: Tab[];
@@ -195,6 +196,8 @@ export const RightPanel = memo(function RightPanel({
               gitSelected={rightView === "git"}
               onSelectGit={() => onSelectView("git")}
               gitBadge={gitBadge}
+              terminalSelected={rightView === "terminal"}
+              onSelectTerminal={() => onSelectView("terminal")}
             />
           </div>
           {rightView === "explorer" ? (
@@ -260,7 +263,7 @@ export const RightPanel = memo(function RightPanel({
               </button>
             </div>
             )
-          ) : activeFileTab && (
+          ) : rightView === "file" && activeFileTab && (
             <div style={{ display: "flex", alignItems: "center", flexShrink: 0, padding: "0 2px" }} role="toolbar" aria-label={activeFileTab.filePath}>
               <button
                 onClick={onMentionActiveFile}
@@ -414,6 +417,16 @@ export const RightPanel = memo(function RightPanel({
               <div style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.6, maxWidth: 260 }}>{t("sessionSidebar.selectProjectFirst")}</div>
             </div>
           ))}
+        </div>
+        {/* Terminal tab view — kept mounted so the shell and its scrollback survive tab switches. */}
+        <div id="workspace-file-panel-terminal" role="tabpanel" aria-label={t("tabBar.terminal")} style={{ display: rightView === "terminal" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
+          {visitedViews.has("terminal") && (
+            <TerminalPanel
+              cwd={explorerCwd}
+              emptyMessage={t("terminal.selectProjectFirst")}
+              authRequiredMessage={t("terminal.authRequired")}
+            />
+          )}
         </div>
         {/* Keep open viewers mounted so switching tabs preserves scroll and preview state. */}
         <div id="workspace-file-panel-file" role="tabpanel" aria-label={activeFileTab?.filePath ?? t("appShell.filePanel")} style={{ display: rightView === "file" ? "block" : "none", flex: 1, minHeight: 0, overflow: "hidden" }}>

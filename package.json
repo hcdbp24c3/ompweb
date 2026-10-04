@@ -43,7 +43,7 @@
     "build": "next build --webpack",
     "start": "next start -H 127.0.0.1 -p 30177",
     "start:lan": "next start -H 0.0.0.0 -p 30177",
-    "test": "node --experimental-strip-types --test lib/*.test.mjs lib/omp/*.test.mjs lib/i18n/*.test.mjs components/*.test.mjs components/ui/*.test.mjs hooks/*.test.mjs bin/*.test.mjs",
+    "test": "node --experimental-strip-types --test lib/*.test.mjs lib/omp/*.test.mjs lib/terminal/*.test.mjs lib/i18n/*.test.mjs components/*.test.mjs components/ui/*.test.mjs hooks/*.test.mjs bin/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "tray:install": "node bin/omp-web-tray.js --install",
@@ -60,6 +60,8 @@
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
     "cmdk": "^1.1.1",
     "dbus-next": "^0.10.2",
     "katex": "^0.16.47",
@@ -68,6 +70,7 @@
     "mdast-util-find-and-replace": "^3.0.2",
     "mermaid": "^11.17.2",
     "next": "16.3.4",
+    "node-pty": "1.1.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-markdown": "^10.1.0",
@@ -98,5 +101,8 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^5",
     "typescript-language-server": "^6.0.0"
+  },
+  "overrides": {
+    "node-gyp": "^11.4.2"
   }
 }

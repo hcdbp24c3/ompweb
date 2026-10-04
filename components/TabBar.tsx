@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Folder, GitBranch, X } from "lucide-react";
+import { Folder, GitBranch, Terminal, X } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
 import { getFileIcon } from "./FileIcons";
 
@@ -27,21 +27,26 @@ interface Props {
   onSelectGit?: () => void;
   /** Changed-file count badge on the Git tab. */
   gitBadge?: number;
+  /** Pinned terminal tab rendered after Git. */
+  terminalSelected?: boolean;
+  onSelectTerminal?: () => void;
 }
 
-export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, explorerSelected = false, onSelectExplorer, explorerBadge = 0, gitSelected = false, onSelectGit, gitBadge = 0 }: Props) {
+export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, explorerSelected = false, onSelectExplorer, explorerBadge = 0, gitSelected = false, onSelectGit, gitBadge = 0, terminalSelected = false, onSelectTerminal }: Props) {
   const { t } = useI18n();
   const [hoveredClose, setHoveredClose] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const orderedTabIds = [
     ...(onSelectExplorer ? ["explorer"] : []),
     ...(onSelectGit ? ["git"] : []),
+    ...(onSelectTerminal ? ["terminal"] : []),
     ...tabs.map((tab) => tab.id),
   ];
 
   const selectTabById = (id: string) => {
     if (id === "explorer") onSelectExplorer?.();
     else if (id === "git") onSelectGit?.();
+    else if (id === "terminal") onSelectTerminal?.();
     else {
       const tab = tabs.find((item) => item.id === id);
       if (tab) onSelectTab(tab.id);
@@ -257,6 +262,60 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, explorerSel
               {gitBadge > 99 ? "99+" : gitBadge}
             </span>
           )}
+        </div>
+      )}
+      {onSelectTerminal && (
+        <div
+          data-tab-id="terminal"
+          className="tabbar-tab ui-focus-ring"
+          onClick={onSelectTerminal}
+          role="tab"
+          tabIndex={terminalSelected ? 0 : -1}
+          aria-selected={terminalSelected}
+          aria-label={t("tabBar.terminal")}
+          aria-controls="workspace-file-panel-terminal"
+          title={t("tabBar.terminal")}
+          onKeyDown={(event) => handleTabKeyDown(event, "terminal")}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            height: "var(--tab-height)",
+            paddingLeft: 12,
+            paddingRight: 10,
+            borderRight: "1px solid var(--border)",
+            background: terminalSelected ? "var(--bg)" : "var(--bg-panel)",
+            cursor: "pointer",
+            fontSize: "var(--text-sm)",
+            color: terminalSelected ? "var(--text)" : "var(--text-muted)",
+            whiteSpace: "nowrap",
+            flexShrink: 0,
+            userSelect: "none",
+            position: "relative",
+            transition: `background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)`,
+          }}
+        >
+          {terminalSelected && (
+            <span
+              aria-hidden="true"
+              style={{
+                position: "absolute",
+                left: 0,
+                right: 0,
+                bottom: 0,
+                height: 2,
+                background: "var(--accent)",
+                borderTopLeftRadius: "var(--radius-control)",
+                borderTopRightRadius: "var(--radius-control)",
+              }}
+            />
+          )}
+          <span style={{ flexShrink: 0, opacity: terminalSelected ? 1 : 0.7, display: "flex", alignItems: "center", color: terminalSelected ? "var(--accent)" : undefined }}>
+            <Terminal size={13} strokeWidth={2} aria-hidden="true" />
+          </span>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", fontWeight: terminalSelected ? 500 : 400 }}>
+            {t("tabBar.terminal")}
+          </span>
         </div>
       )}
       {tabs.map((tab) => {
