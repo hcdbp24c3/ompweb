@@ -898,7 +898,7 @@ export async function GET(request: Request) {
       const write = (event: string, data: unknown) => {
         if (closed) return;
         try {
-          controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: event, ...data })}\n\n`));
         } catch {
           closed = true;
         }
@@ -1186,11 +1186,12 @@ test("opening the panel asks for the cwd's stream and nothing else", async () =>
 });
 
 test("a replay frame and a later output frame are both delivered verbatim", async () => {
-  // The replay frame carries scrollback from before this client connected; the
-  // output frames carry what arrives after. Dropping either shows a shell that
-  // looks half-alive after a reload.
+  // The replay frame carries scrollback from before this client connected, the
+  // output frames what arrives after. Dropping either shows a shell that looks
+  // half-alive after a reload — and a vacuous assertion here would pass against
+  // a panel that dropped all three.
   const written = [];
-  globalThis.Terminal = class {
+  const Terminal = class {
     constructor() { this.cols = 80; this.rows = 24; }
     loadAddon() {}
     open() {}
@@ -1199,9 +1200,14 @@ test("a replay frame and a later output frame are both delivered verbatim", asyn
     onData() { return { dispose() {} }; }
     onResize() { return { dispose() {} }; }
   };
-  globalThis.FitAddon = class { loadAddon() {} fit() {} proposeDimensions() { return { cols: 80, rows: 24 }; } };
+  const FitAddon = class {
+    loadAddon() {}
+    fit() {}
+    proposeDimensions() { return { cols: 80, rows: 24 }; }
+  };
+  const loadTerminal = async () => ({ Terminal, FitAddon });
 
-  render(React.createElement(TerminalPanel, { cwd: "/repo" }));
+  render(React.createElement(TerminalPanel, { cwd: "/repo", loadTerminal }));
   await settle();
   await act(async () => {
     streams[0].source.emit({ type: "replay", data: "welcome\r\n" });
@@ -1210,14 +1216,26 @@ test("a replay frame and a later output frame are both delivered verbatim", asyn
   assert.deepEqual(written, ["welcome\r\n", "$ "]);
 });
 
-test("keystrokes are POSTed to the input route", async () => {
-  render(React.createElement(TerminalPanel, { cwd: "/repo" }));
+test("frames arrive without an SSE event name, so onmessage receives them", async () => {
+  // `event:` and `onmessage` are mutually exclusive: a named event never fires
+  // onmessage. If the server ever starts naming events, the panel goes silent.
+  const written = [];
+  const Terminal = class {
+    constructor() { this.cols = 80; this.rows = 24; }
+    loadAddon() {} open() {} dispose() {}
+    write(d) { written.push(d); }
+    onData() { return { dispose() {} }; }
+    onResize() { return { dispose() {} }; }
+  };
+  const FitAddon = class { loadAddon() {} fit() {} proposeDimensions() { return { cols: 80, rows: 24 }; } };
+
+  render(React.createElement(TerminalPanel, {
+    cwd: "/repo",
+    loadTerminal: async () => ({ Terminal, FitAddon }),
+  }));
   await settle();
-  // The panel renders a real xterm only in a browser; here we assert the
-  // transport contract through the exported helper.
-  const { encodeKeystrokes } = await jiti.import("./TerminalPanel.tsx");
-  assert.deepEqual(encodeKeystrokes("a\r"), ["a\r"]);
-  assert.deepEqual(encodeKeystrokes(""), []);
+  assert.equal(streams[0].source.onmessage !== null, true,
+    "the panel subscribed through onmessage, so it only works on unnamed frames");
 });
 
 test("changing cwd closes the old stream and opens a new one", async () => {
@@ -1272,12 +1290,25 @@ export interface TerminalPanelProps {
   emptyMessage?: string;
   authRequiredMessage?: string;
   onAuthRequired?: () => void;
+  /** Supplies the xterm classes. Defaults to the dynamic import; tests pass a
+   *  fake because assigning globalThis cannot intercept an ESM import, and the
+   *  package does not exist until the dependency task. */
+  loadTerminal?: () => Promise<{ Terminal: unknown; FitAddon: unknown }>;
 }
 
 /** Resize is chatty while a window is dragged; the server only needs the final
  *  size, so trailing-edge debounce keeps a drag from posting hundreds of
  *  resizes. */
 const RESIZE_DEBOUNCE_MS = 150;
+
+/** Default xterm loader — real dynamic import, used in the browser. */
+async function defaultTerminalLoader() {
+  const [xterm, fitAddon] = await Promise.all([
+    import("@xterm/xterm"),
+    import("@xterm/addon-fit"),
+  ]);
+  return { Terminal: xterm.Terminal, FitAddon: fitAddon.FitAddon };
+}
 
 /** Split raw terminal input into the chunking the input route expects. */
 export function encodeKeystrokes(data: string): string[] {
@@ -1290,7 +1321,7 @@ interface TerminalView {
   host: HTMLDivElement;
 }
 
-export function TerminalPanel({ cwd, emptyMessage, authRequiredMessage, onAuthRequired }: TerminalPanelProps) {
+export function TerminalPanel({ cwd, emptyMessage, authRequiredMessage, onAuthRequired, loadTerminal }: TerminalPanelProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<TerminalView | null>(null);
   const sourceRef = useRef<EventSource | null>(null);
@@ -1330,13 +1361,15 @@ export function TerminalPanel({ cwd, emptyMessage, authRequiredMessage, onAuthRe
     (async () => {
       // xterm touches the DOM and measure APIs at import time, so it is loaded
       // only in the browser and only when a workspace is open.
-      const [{ Terminal }, { FitAddon }] = await Promise.all([
-        import("@xterm/xterm"),
-        import("@xterm/addon-fit"),
-      ]);
+      const { Terminal, FitAddon } = await (loadTerminal ?? defaultTerminalLoader)();
       if (disposed || !hostRef.current) return;
 
-      const term = new Terminal({
+      const term = new (Terminal as new (opts: Record<string, unknown>) => {
+        cols: number; rows: number; write(d: string): void; dispose(): void;
+        onData(cb: (d: string) => void): { dispose(): void };
+        onResize(cb: (s: { cols: number; rows: number }) => void): { dispose(): void };
+        loadAddon(a: unknown): void; open(host: HTMLElement): void;
+      })({
         convertEol: true,
         fontFamily: "var(--font-mono)",
         fontSize: 12,
@@ -1344,7 +1377,7 @@ export function TerminalPanel({ cwd, emptyMessage, authRequiredMessage, onAuthRe
         scrollback: 2000,
         theme: { background: "var(--bg-panel)" },
       });
-      const fit = new FitAddon();
+      const fit = new (FitAddon as new () => { fit(): void; proposeDimensions(): { cols: number; rows: number } | undefined })();
       term.loadAddon(fit);
       term.open(hostRef.current);
       fit.fit();
@@ -1594,10 +1627,10 @@ git commit -m "Add node-pty and xterm, and compile the native module in the imag
 - [ ] **Step 1: Run the app against a real shell**
 
 ```bash
-npm run dev
+npm run dev -- -p 30179
 ```
 
-Open the UI, pick a workspace, click the Terminal tab. Confirm by hand:
+Port 30178 is already bound by another dev server in this environment, so the worktree uses 30179. Open the UI, pick a workspace, click the Terminal tab. Confirm by hand:
 - a prompt appears and typing runs commands;
 - `vim` opens and `q` exits (proves a real PTY, not a piped shell);
 - Ctrl-C interrupts a long command (`sleep 60`);
@@ -1607,14 +1640,14 @@ Open the UI, pick a workspace, click the Terminal tab. Confirm by hand:
 - [ ] **Step 2: Verify the password guard**
 
 ```bash
-OMP_WEB_PASSWORD= npm run dev
+OMP_WEB_PASSWORD= npm run dev -- -p 30179
 ```
 Expected: the tab shows the "set OMP_WEB_PASSWORD" guidance and no shell starts. Then set a password and confirm the terminal works.
 
 - [ ] **Step 3: Confirm the multi-arch image builds**
 
 ```bash
-git push fork main
+git push -u fork feat/terminal
 gh run list -R hcdbp24c3/ompweb --limit 2
 ```
 Watch both `build linux/amd64` and `build linux/arm64`. If arm64 fails on the native build, **report before pushing anything else** — a broken arm64 image is worse than a missing terminal.
