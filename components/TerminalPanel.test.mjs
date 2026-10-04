@@ -477,6 +477,13 @@ test("a stream that closes with no exit frame is reported, not waited on", async
   await settle();
   assert.ok(screen.getByText("The terminal stream closed. The shell may have been reaped."));
   assert.ok(screen.getByRole("button", { name: "Start a new shell" }), "and offers a way back");
+  // The banner is not the guard. Nothing is arriving any more, so a keystroke is
+  // either typed into a shell this panel can no longer show or — because /input
+  // *attaches* — into a fresh 80×24 one nobody is watching. A dropped connection
+  // is the common way to get here, not a rare one.
+  const before = posts.length;
+  await act(async () => { kit.type("ls\r"); });
+  assert.equal(posts.length, before, "a keystroke after the stream closed is not posted either");
 });
 
 test("starting a new shell after an exit opens a new stream", async () => {

@@ -427,6 +427,12 @@ export function TerminalPanel({
       if (!cancelled && !shellEnded) {
         // The shell was reaped or the connection dropped: nothing more will
         // arrive, and a terminal that waits for it is the frozen-terminal bug.
+        // A dropped connection is the common way to get here, not a dead shell,
+        // so this is also the end of typing: the guard in `onData` keys off the
+        // same flag the exit frame sets, and /input *attaches* — a keystroke now
+        // would write into a shell this panel can no longer show, or spawn a
+        // fresh one nobody is watching.
+        shellEnded = true;
         setOutcome({ kind: "closed" });
       }
     })().catch((error: unknown) => {
