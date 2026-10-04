@@ -22,15 +22,31 @@ WORKDIR /app
 
 # `lib/omp/agents-service.ts` unpacks bundled archives and `bin/` reads version
 # metadata at build time, so git and ca-certificates are build-time requirements,
-# not runtime ones.
+# not runtime ones. build-essential and python3 are node-gyp's toolchain: `node-pty`
+# is a native module (libuv) and its published tarball carries prebuilds for darwin
+# and win32 only — nothing for linux — so `npm ci` below compiles it from source on
+# whichever architecture this image is built for. Hence build-only here, absent from
+# the runtime stage.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        git \
+        python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Dependencies first: this layer only rebuilds when the lockfile changes, so the
 # ~3min `next build` below stays cached across source-only edits.
 COPY package.json package-lock.json ./
 RUN npm ci
+
+# node-pty must be compiled against this image's own Node headers and architecture,
+# which `npm ci` above already did on linux (there is no linux prebuild to fall back
+# on). Build it again explicitly so the `.node` that ships can never come from a
+# bundled prebuild meant for a different platform, on any architecture. This must
+# stay in the builder stage: it runs after the full install but before
+# `npm prune --omit=dev`, so the compiled module is what gets pruned to.
+RUN npm rebuild node-pty --build-from-source
 
 # `next.config.ts` reads package.json, and the webpack config reads `components/`
 # paths for trace-ignore patterns, so the full source tree has to be present.
