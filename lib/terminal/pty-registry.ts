@@ -1,4 +1,5 @@
 import { existsSync } from "fs";
+import { sanitizeProjectCommandEnvironment } from "../project-command-env";
 
 /**
  * Lifecycle owner for terminal PTY processes.
@@ -41,6 +42,13 @@ export interface TerminalHandle {
   replay(): string;
   /** Subscribe to live output. Returns an unsubscribe function. */
   addListener(listener: (chunk: string) => void): () => void;
+  /**
+   * Subscribe to "this shell is gone", so a client can close its stream instead
+   * of showing a frozen terminal whose keystrokes are silently dropped.
+   * Subscribe while the shell is alive: a shell that has already been retired
+   * will not call back. Returns an unsubscribe function.
+   */
+  onExit(cb: () => void): () => void;
 }
 
 export interface RegistryLimits {
@@ -116,6 +124,8 @@ interface Entry {
   /** Live-output subscribers. Several browser tabs may watch one shell without
    *  each spawning one. */
   listeners: Set<(chunk: string) => void>;
+  /** Clients that must be told when the shell goes away. */
+  exitSubscribers: Set<() => void>;
   /** Built on first use and kept, so re-attaching to a live shell hands back the
    *  identical handle instead of an equal-looking copy. */
   handle: TerminalHandle | null;
@@ -145,6 +155,7 @@ export function createPtyRegistry(
    */
   function dispose(cwd: string, entry: Entry, kill: boolean) {
     clearIdle(entry);
+    const wasLive = entry.live;
     if (entries.get(cwd) === entry) entries.delete(cwd);
     entry.live = false;
     if (kill) {
@@ -154,10 +165,34 @@ export function createPtyRegistry(
         // Already gone; nothing to clean up.
       }
     }
+    if (!wasLive) return;
+    // A shell that disappears under a watching client has to say so. Silence
+    // leaves a frozen terminal on screen whose every later keystroke is dropped
+    // by the liveness check on the handle, with nothing to explain why. Firing
+    // per subscriber keeps one broken listener from stranding the others.
+    const subscribers = [...entry.exitSubscribers];
+    entry.exitSubscribers.clear();
+    for (const notify of subscribers) {
+      try {
+        notify();
+      } catch {
+        // Nothing to clean up.
+      }
+    }
   }
 
-  function armIdle(cwd: string, entry: Entry) {
+  /**
+   * Re-arms the reap timer, but only while nobody is reading.
+   *
+   * "Idle" has to mean unwatched, not quiet. A shell somebody is typing into in
+   * vim prints nothing for minutes at a time, and reaping it would discard their
+   * buffer mid-edit while the browser still shows a live terminal. The clock
+   * therefore restarts every time the last listener leaves, not on a timer that
+   * attach arms once and nothing else ever touches.
+   */
+  function syncIdle(cwd: string, entry: Entry) {
     clearIdle(entry);
+    if (!entry.live || entry.listeners.size > 0) return;
     entry.idleTimer = setTimeout(() => dispose(cwd, entry, true), idleMs);
     // Never hold the process open just for an idle shell.
     entry.idleTimer.unref?.();
@@ -166,26 +201,33 @@ export function createPtyRegistry(
   function attach(cwd: string, cols: number, rows: number): TerminalHandle {
     const existing = entries.get(cwd);
     if (existing?.live) {
-      armIdle(cwd, existing);
+      syncIdle(cwd, existing);
       return handleFor(cwd, existing);
     }
+    // `!existing?.live` is defence, not a live path: dispose() clears `live` and
+    // deletes the map entry together, so a stored entry is always live. Were that
+    // ever untrue, the spawn below replaces it rather than writing into a corpse.
 
     if (entries.size >= maxTerminals) throw new TooManyTerminalsError(maxTerminals);
 
-    const pty = spawn({
-      cwd,
-      cols,
-      rows,
-      env: {
-        ...process.env,
-        TERM: "xterm-256color",
-        SHELL: resolveShell(),
-        // Clear an inherited CI: the child really is a TTY, and programs that
-        // see CI switch off spinners, progress bars and colour — exactly the
-        // feedback an interactive shell needs.
-        CI: "",
-      },
+    // Drop the host's own runtime variables (PORT, NODE_ENV, NEXT_*) so the
+    // shell does not behave as if it were running inside the web app, then the
+    // guard password: OMP_WEB_PASSWORD is what protects this very terminal, and
+    // a shell that can echo it hands the guard to anyone who gets a keystroke
+    // through. sanitizeProjectCommandEnvironment knows nothing about it, so it is
+    // removed here rather than widened there.
+    const env = sanitizeProjectCommandEnvironment({
+      ...process.env,
+      TERM: "xterm-256color",
+      SHELL: resolveShell(),
+      // Clear an inherited CI: the child really is a TTY, and programs that
+      // see CI switch off spinners, progress bars and colour — exactly the
+      // feedback an interactive shell needs.
+      CI: "",
     });
+    delete env.OMP_WEB_PASSWORD;
+
+    const pty = spawn({ cwd, cols, rows, env });
 
     const entry: Entry = {
       pty,
@@ -193,6 +235,7 @@ export function createPtyRegistry(
       idleTimer: null,
       live: true,
       listeners: new Set(),
+      exitSubscribers: new Set(),
       handle: null,
     };
     entries.set(cwd, entry);
@@ -208,7 +251,7 @@ export function createPtyRegistry(
       dispose(cwd, entry, false);
     });
 
-    armIdle(cwd, entry);
+    syncIdle(cwd, entry);
     return handleFor(cwd, entry);
   }
 
@@ -240,7 +283,15 @@ export function createPtyRegistry(
         },
         addListener(listener) {
           entry.listeners.add(listener);
-          return () => { entry.listeners.delete(listener); };
+          syncIdle(cwd, entry);
+          return () => {
+            entry.listeners.delete(listener);
+            syncIdle(cwd, entry);
+          };
+        },
+        onExit(cb) {
+          entry.exitSubscribers.add(cb);
+          return () => { entry.exitSubscribers.delete(cb); };
         },
       };
     }
@@ -250,10 +301,10 @@ export function createPtyRegistry(
   return {
     attach,
     detach(cwd) {
-      // Do not kill: a tab switch is not an intent to end the shell. Idle reaping
-      // decides that.
+      // Do not kill: a tab switch is not an intent to end the shell. Reaping
+      // decides that, and only once nobody is reading.
       const entry = entries.get(cwd);
-      if (entry) armIdle(cwd, entry);
+      if (entry) syncIdle(cwd, entry);
     },
     disposeAll() {
       for (const [cwd, entry] of [...entries]) dispose(cwd, entry, true);
@@ -325,6 +376,9 @@ export function asyncSpawnerBridge(spawnReal: AsyncSpawnPty = defaultPtySpawner)
         pty?.resize(cols, rows);
       },
       kill() {
+        // A shell that already exited has no process left to signal, and
+        // killRequested is only read when the spawn resolves — which it has.
+        if (exited) return;
         killRequested = true;
         pty?.kill();
       },
@@ -355,9 +409,17 @@ export function setPtySpawner(next: SpawnPty): void {
  */
 export function getSharedPtyRegistry(spawn?: SpawnPty): PtyRegistry {
   if (!globalThis.__ompWebTerminalRegistry) {
-    globalThis.__ompWebTerminalRegistry = createPtyRegistry(
-      spawn ?? injectedSpawner ?? asyncSpawnerBridge(),
-    );
+    const registry = createPtyRegistry(spawn ?? injectedSpawner ?? asyncSpawnerBridge());
+    globalThis.__ompWebTerminalRegistry = registry;
+    // Mirror the session registry in lib/rpc-manager.ts and the utility process in
+    // lib/omp/rpc-utility.ts: kill every shell on shutdown so none outlives the
+    // server. Without this a shell depends on the kernel SIGHUP-ing the
+    // foreground group when the pty master closes, which is half the orphan
+    // problem the globalThis slot above exists to prevent.
+    const cleanup = () => registry.disposeAll();
+    process.once("exit", cleanup);
+    process.once("SIGINT", cleanup);
+    process.once("SIGTERM", cleanup);
   }
   return globalThis.__ompWebTerminalRegistry;
 }
