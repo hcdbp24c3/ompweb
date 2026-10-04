@@ -6,9 +6,12 @@ import { guardTerminalCwd } from "@/lib/terminal/guard";
 export const dynamic = "force-dynamic";
 
 // { cwd } and nothing else, so this is small enough that any request near the
-// cap is already nonsense. Bounded while reading rather than after, so a
-// chunked POST cannot stream an unbounded body in first.
-const MAX_CLOSE_REQUEST_BYTES = 4 * 1024;
+// cap is already nonsense — but the floor has to clear a legal request: PATH_MAX
+// is 4096 including the NUL, so 4095 path bytes plus the JSON envelope and any
+// multi-byte UTF-8 in the path is already past 4KB. 8 KiB leaves the envelope
+// room without making the cap meaningless. Bounded while reading rather than
+// after, so a chunked POST cannot stream an unbounded body in first.
+const MAX_CLOSE_REQUEST_BYTES = 8 * 1024;
 
 /** POST { cwd } — kill the shell now instead of waiting for idle reaping.
  *  Reached only from an explicit "stop shell" control; closing a browser tab
