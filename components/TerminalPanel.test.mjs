@@ -22,6 +22,20 @@ const posts = [];
 const streams = [];
 const observers = [];
 
+/**
+ * POSTs the *server* received, in the order it received them.
+ *
+ * Keystrokes reach the pty in that order and in no other, so a request order that
+ * differs from the typed order is a scrambled command line. This is kept apart
+ * from `posts` — the order the panel *issued* requests — because a panel that
+ * fires a burst without waiting answers `fetch` before the next one is issued,
+ * and those two orders are not the same thing.
+ */
+const arrivals = [];
+/** Requests issued while held, waiting for the test to deliver them. */
+const heldPosts = [];
+let postsAreHeld = false;
+
 const encoder = new TextEncoder();
 
 /** A 200 response whose body never ends until the panel cancels it. */
@@ -134,14 +148,24 @@ function stubTokens(tokens) {
 beforeEach(() => {
   globalThis.getComputedStyle = realGetComputedStyle;
   posts.length = 0;
+  arrivals.length = 0;
+  heldPosts.length = 0;
+  postsAreHeld = false;
   streams.length = 0;
   observers.length = 0;
   window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
   globalThis.ResizeObserver = FakeResizeObserver;
   globalThis.fetch = async (url, init) => {
     if (init?.method === "POST") {
-      posts.push({ url: String(url), body: JSON.parse(init.body) });
-      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      const request = { url: String(url), body: JSON.parse(init.body) };
+      posts.push(request);
+      if (!postsAreHeld) {
+        arrivals.push(request);
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      return new Promise((resolve, reject) => {
+        heldPosts.push({ ...request, resolve, reject });
+      });
     }
     const stream = fakeStream();
     streams.push({ url: String(url), source: stream });
@@ -155,6 +179,58 @@ const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 20
 
 /** Past the panel's 150 ms resize debounce, with room to spare. */
 const pastResizeDebounce = () => act(async () => { await new Promise((r) => setTimeout(r, 250)); });
+
+/**
+ * Stop POSTs answering themselves: each one waits for the test to deliver it.
+ *
+ * This is the half of the double that makes request ordering testable at all.
+ * The original one resolved every POST synchronously, so with nothing to wait
+ * for each request completed before the next was issued and the arrival order
+ * was trivially the typed order — which is why a panel firing one unsynchronised
+ * request per keystroke passed every test here and still scrambled the user's
+ * typing in the browser.
+ */
+function holdPosts() {
+  postsAreHeld = true;
+}
+
+/** Requests issued and not yet delivered — one per request actually in flight. */
+const heldCount = () => heldPosts.length;
+
+/** Drain React and the microtask queue, so a chained request can be issued. */
+const drain = () => act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+/**
+ * Deliver the newest held request first: the order that scrambles a burst the
+ * panel did not serialise. One at a time, draining in between, so a panel that
+ * waits for a response before sending its next keystroke has that request issued
+ * — and so queued — before the next delivery, while a panel that fired the whole
+ * burst at once has all of them waiting to be handed back reversed.
+ *
+ * `answer` decides each request's fate; the default is a 200.
+ */
+async function deliverHeldNewestFirst(answer) {
+  while (heldPosts.length > 0) {
+    const request = heldPosts.pop();
+    arrivals.push(request);
+    if (answer) {
+      answer(request);
+    } else {
+      request.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    }
+    await drain();
+  }
+}
+
+/** Deliver held requests in the order they were issued: nothing was scrambled. */
+async function deliverHeldInIssuedOrder() {
+  while (heldPosts.length > 0) {
+    const request = heldPosts.shift();
+    arrivals.push(request);
+    request.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    await drain();
+  }
+}
 
 /**
  * Deliver each part as its own read, so a chunk boundary really falls between
@@ -546,6 +622,149 @@ test("a keystroke posts the raw data and no size", async () => {
   const input = posts.filter((p) => p.url.includes("/api/terminal/input"));
   const keystroke = input.find((p) => p.body.data !== undefined);
   assert.deepEqual(keystroke.body, { cwd: "/repo", data: "git status\r" });
+});
+
+/** Render a panel whose POSTs are held, so a test controls their arrival. */
+function renderHeldPanel() {
+  holdPosts();
+  const kit = termKit();
+  const view = render(React.createElement(TerminalPanel, { cwd: "/repo", loadTerminal: kit.loadTerminal }));
+  return { kit, view };
+}
+
+/** What reached the shell, as one string, however it was batched into requests. */
+const received = () => arrivals
+  .filter((r) => r.body.data !== undefined)
+  .map((r) => r.body.data)
+  .join("");
+
+test("keystrokes reach the shell in the order they were typed", async () => {
+  // The panel fired one POST per keystroke and never waited for it, so the bytes
+  // reached the pty in whatever order those requests arrived. Measured in a real
+  // browser: `stty size` typed 12ms apart ran as `tyst`, and it was corrupted in
+  // the shell's echo as well as in its output — write order, not rendering.
+  //
+  // Delivering the requests newest-first is the order that scrambles an
+  // unsynchronised burst, and the assertion is on the concatenation rather than
+  // per request, so batching is allowed — arriving out of order is not.
+  const { kit } = renderHeldPanel();
+  await settle();
+
+  await act(async () => { for (const key of "stty") kit.type(key); });
+  await deliverHeldNewestFirst();
+
+  assert.equal(received(), "stty", "the shell received the keystrokes as they were typed");
+});
+
+test("a burst is one request in flight, not one per character", async () => {
+  // The ordering is the bug, but one unsynchronised request per character is also
+  // what filled the in-flight window in the first place: holding a key down at
+  // 30/s while each request is a fresh HTTP round trip to a Next route that
+  // re-resolves the pty. Queueing the tail is what keeps that window at one.
+  const { kit } = renderHeldPanel();
+  await settle();
+
+  await act(async () => { for (const key of "stty") kit.type(key); });
+  assert.equal(heldCount(), 1, "the three later keystrokes are queued, not in flight");
+
+  await deliverHeldNewestFirst();
+  assert.deepEqual(arrivals.map((r) => r.body.data), ["s", "tty"], "queued keystrokes travel together, in order");
+});
+
+test("a paste is sent in one request rather than one per character", async () => {
+  // xterm delivers a paste in a single onData, so this is already true for the
+  // unfixed panel — the case it exists to pin is that coalescing a burst must not
+  // turn one delivery into many.
+  const { kit } = renderHeldPanel();
+  await settle();
+
+  await act(async () => { kit.type("ls -la /tmp\r"); });
+  assert.equal(heldCount(), 1);
+  await deliverHeldNewestFirst();
+  assert.equal(posts.length, 1);
+  assert.equal(received(), "ls -la /tmp\r");
+});
+
+test("a refused keystroke does not wedge the keyboard", async () => {
+  // Serialising must not turn one failure into a dead keyboard: a 400, a 413 on an
+  // oversized paste or a route that answers 500 would otherwise leave every later
+  // keystroke queued behind a promise that has already rejected.
+  const { kit } = renderHeldPanel();
+  await settle();
+
+  await act(async () => { kit.type("a"); });
+  await deliverHeldNewestFirst((request) => request.resolve(
+    new Response(JSON.stringify({ error: "stream_write_failed" }), { status: 500 }),
+  ));
+  assert.equal(screen.getByRole("alert").textContent, "stream_write_failed", "the failure is still reported");
+
+  await act(async () => { kit.type("b"); });
+  await deliverHeldInIssuedOrder();
+  assert.equal(received(), "ab", "and the next keystroke still reaches the shell");
+});
+
+test("a dropped connection does not wedge the keyboard either", async () => {
+  // A rejected fetch — the server restarting mid-command, a proxy cutting the
+  // request — reaches the queue as a thrown error rather than a status.
+  const { kit } = renderHeldPanel();
+  await settle();
+
+  await act(async () => { kit.type("a"); });
+  await deliverHeldNewestFirst((request) => request.reject(new TypeError("Failed to fetch")));
+
+  await act(async () => { kit.type("b"); });
+  await deliverHeldInIssuedOrder();
+  assert.equal(received(), "ab");
+});
+
+test("a resize cannot overtake the keystrokes queued in front of it", async () => {
+  // /api/terminal/input applies data and a resize in one handler, and its own
+  // comment says the two race each other on one stream. A resize issued outside
+  // the queue can land between two keystrokes of one line and reflow it mid-type.
+  const { kit } = renderHeldPanel();
+  await settle();
+
+  await act(async () => { kit.type("a"); });
+  await act(async () => { kit.resizeTo({ cols: 120, rows: 40 }); observers[0].trigger(); });
+  await pastResizeDebounce();
+  assert.equal(heldCount(), 1, "the resize waits behind the keystroke in flight");
+
+  await deliverHeldNewestFirst();
+  const order = arrivals.map((r) => (r.body.data !== undefined ? r.body.data : `${r.body.cols}x${r.body.rows}`));
+  assert.deepEqual(order, ["a", "120x40"]);
+});
+
+test("closing the panel drops queued keystrokes instead of writing them", async () => {
+  // /input *attaches*, which spawns when the cwd is not live, so a queue that
+  // flushed after teardown would resurrect a shell nobody is watching — into a
+  // panel whose terminal has already been disposed.
+  const { kit, view } = renderHeldPanel();
+  await settle();
+
+  await act(async () => { kit.type("x"); kit.type("y"); });
+  assert.equal(heldCount(), 1);
+
+  view.unmount();
+  await deliverHeldNewestFirst();
+  assert.equal(posts.length, 1, "the queued keystroke was dropped, not posted");
+});
+
+test("changing cwd drops the old cwd's queued keystrokes", async () => {
+  // A cwd change tears the shell down and starts another one, so a queue left
+  // running by the old shell would type into a session the user never chose.
+  const { kit, view } = renderHeldPanel();
+  await settle();
+
+  await act(async () => { kit.type("x"); });
+  await act(async () => {
+    view.rerender(React.createElement(TerminalPanel, { cwd: "/other", loadTerminal: kit.loadTerminal }));
+  });
+  await deliverHeldNewestFirst();
+
+  assert.deepEqual(
+    posts.filter((p) => p.body.data !== undefined).map((p) => p.body),
+    [{ cwd: "/repo", data: "x" }],
+  );
 });
 
 test("every resize carries cols and rows together, debounced to the final size", async () => {

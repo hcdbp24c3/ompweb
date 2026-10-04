@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { RefreshCw, Square, Terminal as TerminalIcon } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
 import { useTheme } from "@/hooks/useTheme";
+import { createTerminalInputQueue } from "@/lib/terminal/input-queue";
 
 const INPUT_PATH = "/api/terminal/input";
 const CLOSE_PATH = "/api/terminal/close";
@@ -203,10 +204,12 @@ export function TerminalPanel({
     });
     if (response.ok) return;
     const failure = await readFailure(response);
-    if (failure.authRequired) {
-      setOutcome({ kind: "auth_required" });
-      return;
-    }
+    if (failure.authRequired) setOutcome({ kind: "auth_required" });
+    // Every refusal is thrown, the auth one included: these posts go through one
+    // serialised queue, and a rejected promise that ended the chain would turn a
+    // single 400, 413 or 500 into a keyboard that never works again. The guidance
+    // is already on screen for the auth case, so reporting it again would only
+    // replace it.
     throw new Error(failure.message);
   }, []);
 
@@ -295,26 +298,41 @@ export function TerminalPanel({
       };
       teardown = dispose;
 
+      // One request in flight at a time, for keystrokes and resizes alike: the
+      // input route writes `data` into the pty as each request arrives, so
+      // unsynchronised posts arrive in whatever order they finish in and the user's
+      // typing is scrambled — measured as `stty size` running as `tyst`.
+      let postedSize: { cols: number; rows: number } | null = null;
+      const input = createTerminalInputQueue({
+        cwd,
+        send: (body) => post(INPUT_PATH, body),
+        onError: (error, kind) => {
+          // A resize that never landed would leave the shell the wrong shape, so it
+          // is un-recorded and the next measurement — even the same one — posts
+          // again. It is not reported: nothing the user did went wrong.
+          if (kind === "resize") {
+            postedSize = null;
+            return;
+          }
+          setOutcome((current) => (current?.kind === "auth_required" ? current : { kind: "error", message: error.message }));
+        },
+      });
+      disposers.push(() => input.dispose());
+
       const keystrokes = term.onData((data) => {
         // After an exit frame the pty is gone: the write would be a silent
         // server-side no-op, which is indistinguishable from a dead keyboard.
         if (cancelled || shellEnded) return;
-        void post(INPUT_PATH, { cwd, data })
-          .catch((error: Error) => setOutcome({ kind: "error", message: error.message }));
+        input.write(data);
       });
       disposers.push(() => keystrokes.dispose());
 
-      let postedSize: { cols: number; rows: number } | null = null;
       const sendSize = (size: { cols: number; rows: number }) => {
         // Both dimensions or neither: the input route answers 400
         // terminal_size_invalid for half a pair.
         if (postedSize && postedSize.cols === size.cols && postedSize.rows === size.rows) return;
         postedSize = { cols: size.cols, rows: size.rows };
-        void post(INPUT_PATH, { cwd, cols: size.cols, rows: size.rows }).catch(() => {
-          // A resize that never landed would leave the shell the wrong shape, so
-          // it is un-recorded and the next measurement — even the same one — posts again.
-          postedSize = null;
-        });
+        input.resize(size.cols, size.rows);
       };
       // Measure, fit, then tell the shell — all three inside the trailing-edge
       // debounce. A fit redraws the whole canvas, so one per observer callback is
