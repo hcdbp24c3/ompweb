@@ -1,12 +1,27 @@
 import { NextResponse } from "next/server";
+import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { getSharedPtyRegistry, TooManyTerminalsError, type TerminalHandle } from "@/lib/terminal/pty-registry";
 import { guardTerminalCwd } from "@/lib/terminal/guard";
 
 export const dynamic = "force-dynamic";
 
+// Applied while the body is read, so a chunked POST with no Content-Length
+// cannot push arbitrary bytes through before anything notices. Well above a
+// keystroke burst (one write per xterm onData) and above a large paste, and far
+// below the point where buffering matters.
+const MAX_INPUT_REQUEST_BYTES = 256 * 1024;
+// Narrower cap on the `data` field alone: it is what actually reaches a pty
+// write, and it is checked on the parsed value.
 const MAX_INPUT_BYTES = 64 * 1024;
 const MAX_COLS = 500;
 const MAX_ROWS = 300;
+
+interface TerminalInputBody {
+  cwd?: unknown;
+  data?: unknown;
+  cols?: unknown;
+  rows?: unknown;
+}
 
 /**
  * POST body: { cwd, data? } for keystrokes, { cwd, cols, rows } for a resize.
@@ -16,10 +31,16 @@ const MAX_ROWS = 300;
  * before the keystrokes it belongs to.
  */
 export async function POST(request: Request) {
-  let body: { cwd?: unknown; data?: unknown; cols?: unknown; rows?: unknown };
+  let body: TerminalInputBody;
   try {
-    body = await request.json();
-  } catch {
+    body = await parseJsonWithinLimit<TerminalInputBody>(request, MAX_INPUT_REQUEST_BYTES);
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      return NextResponse.json(
+        { error: "Request body too large", code: "terminal_request_too_large" },
+        { status: 413 },
+      );
+    }
     return NextResponse.json({ error: "Invalid JSON body", code: "terminal_invalid_body" }, { status: 400 });
   }
 

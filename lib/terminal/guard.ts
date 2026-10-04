@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import { existsSync, statSync } from "fs";
 import { isAbsolute, resolve } from "path";
 import { getAllowedFileRoots, isExistingPathWithinRoots } from "@/lib/file-access";
+import { isExistingDirectory } from "@/lib/terminal/fs-probe";
 import { isWebPasswordEnabled } from "@/lib/web-auth";
 
 export type TerminalGuardResult = { cwd: string } | { response: NextResponse };
@@ -45,7 +45,18 @@ export async function guardTerminalCwd(cwd: unknown): Promise<TerminalGuardResul
     };
   }
 
-  if (!existsSync(target) || !statSync(target).isDirectory()) {
+  // After the allowlist, never before it: a path that is not ours is refused
+  // without ever being stat-ed.
+  let directory: boolean;
+  try {
+    directory = isExistingDirectory(target);
+  } catch {
+    // Removed between the two calls inside the probe. The same answer as a
+    // directory that is simply gone — and this is the per-keystroke path, so a
+    // thrown ENOENT would otherwise be a Next error page mid-command.
+    directory = false;
+  }
+  if (!directory) {
     return {
       response: NextResponse.json(
         { error: "Terminal directory not found", code: "terminal_cwd_not_found" },
