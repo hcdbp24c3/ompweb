@@ -92,3 +92,6 @@ bin/tray-publish/
 
 # npm packaging archives
 *.tgz
+
+# isolated feature worktrees (git worktrees)
+.worktrees/
