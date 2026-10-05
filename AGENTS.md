@@ -106,6 +106,8 @@ lib/
   rpc-manager.ts       session registry + startRpcSession over RpcProcess
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
   session-resume.ts    running-session list for auto-resume after a restart
+  ssh-key-material.ts  mkdtemp'd 0o600 ssh key + GIT_SSH_COMMAND (BatchMode, accept-new)
+  ssh-known-hosts.ts   owns the shared ~/.omp/agent/known_hosts path
   terminal/            PTY registry, cwd guard, browser-side input queue
   web-settings.ts      omp-web server settings (~/.omp/agent/omp-web-settings.json)
   skills-service.ts    pure-Node skill discovery mirroring omp's providers
@@ -337,7 +339,22 @@ handled or safely ignored.
   never a usage counter** — re-saving a record would change the identity a clone
   runs as. The clone route turns that error into a 400 *before* `mkdir`, so an
   undecidable store never leaves a directory behind.
-- Delivery is `GIT_CONFIG_COUNT` + `GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`
+- **Candidacy is transport-aware.** An `ssh` record is not a candidate for an
+  `https://` remote and a PAT is not a candidate for an `ssh://` one — not
+  "weaker candidates", not candidates at all. `parseRemote()` reports
+  `transport`, `ResolvedGitCredential` carries it, and `isDeliverable()` answers
+  both "which type can authenticate this transport" and "which of its secrets is
+  the one that does". A record whose secret cannot be decrypted (`hasToken: true`,
+  `token: undefined`) is never a candidate either, and must not manufacture an
+  ambiguity. Keep the two questions separate: collapsing them makes the type guard
+  dead code that no test can see.
+- Delivery goes through **one** entry point, `prepareGitCredential(resolved,
+  { signal })`, which returns `{ env, dispose }` — not a plain env object,
+  because the ssh branch writes a key to disk. `dispose()` is idempotent and
+  `signal` makes removal abort-safe (see "SSH key materialization" below).
+  `lib/skill-updates.ts` uses the same call; its URL is https by construction, so
+  it disposes unconditionally rather than branching.
+- For https, delivery is `GIT_CONFIG_COUNT` + `GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`
   carrying `http.https://<host>.extraheader` = `AUTHORIZATION: basic
   base64(user:token)`, merged into `hostChildEnv()` overrides. **Env, never argv
   and never the remote URL** — a URL token lands in `.git/config`, in `ps`, and
@@ -354,13 +371,69 @@ handled or safely ignored.
   worktree is a *sibling* directory, so keying on the worktree path would never
   find the repository). `lib/skill-updates.ts` has only a URL — it must never
   invent a directory.
-- `ssh` records and records whose token cannot be decrypted are **not**
-  candidates: this feature does not teach git to use a private key, and a record
-  that cannot authenticate must not shadow one that can, nor manufacture an
-  ambiguity. Cloning over `ssh://` is therefore unchanged.
 - Some environments (this dev container among them) inject their own
-  `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`; `hostChildEnv()` keeps them. That is why
-  the tests clear the ambient ones before asserting "nothing was added".
+  `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n` **and their own `GIT_SSH_COMMAND`**;
+  `hostChildEnv()` keeps all of them. That is why the route and skill-updates
+  tests clear the ambient ones before asserting "nothing was added" — otherwise
+  the assertion passes for somebody else's value. An inherited `GIT_SSH_COMMAND`
+  is deliberately *not* deleted when there is no credential (it is the operator's
+  own configuration), but ours **replaces** it wholesale when there is one, so an
+  inherited `StrictHostKeyChecking=no` cannot survive into a clone we authenticate.
+
+### SSH key materialization and host keys (`lib/ssh-key-material.ts`, `lib/ssh-known-hosts.ts`)
+- A private key reaches `ssh -i` as a **file**, so one is staged per operation:
+  `mkdtemp` under the system tmpdir (never a fixed name — a predictable path in a
+  shared tmpdir is a symlink-attack surface), directory `0o700`, key `0o600`,
+  both stated explicitly rather than left to umask. It is **never** written under
+  `getAgentDir()`: that directory is the persisted volume, so a plaintext key
+  there outlives the request and survives a container recreate.
+- Removal is **abort-safe, not just `finally`-safe**. The clone route cancels
+  through an `AbortController` and signals the whole process group, so the child's
+  `close` can arrive long after a `finally` around it has run — or never, if a
+  grandchild still holds the output pipes. `prepareGitCredential` takes the signal
+  and disposes on abort; the route *also* disposes in a `finally`, and on the
+  pre-stream 409 path, where there is no stream at all. Both are load-bearing.
+- `GIT_SSH_COMMAND` is built in `buildGitSshCommand()` and carries
+  `-i <key>`, `-o IdentitiesOnly=yes`, `-o PasswordAuthentication=no`,
+  **`-o BatchMode=yes`**, `-o StrictHostKeyChecking=accept-new`,
+  `-o UserKnownHostsFile=<shared path>` and `-T`.
+- **`BatchMode=yes` is the flag that prevents a hang**, not
+  `PasswordAuthentication=no`. Measured: with a passphrase-protected key and no
+  `BatchMode`, `ssh` sits on the passphrase prompt until killed (a `script`-driven
+  run hit an 8s timeout with exit 124); with it, `ssh` fails immediately with
+  `Permission denied (publickey)` and no prompt. The route's `stdio: ["ignore"]`
+  + `detached: true` is a second line of defence, not the guarantee.
+- **A passphrase-protected key is rejected, not supplied.** `sshpass` would add an
+  image dependency and put the passphrase in the child env next to the git
+  credential; an askpass helper is the helper task 09 deliberately avoided. A key
+  that needs a passphrase therefore fails fast instead of being waited on.
+  Detection is *not* attempted — that would duplicate ssh's own private-key parser.
+- **`known_hosts` lives in `getAgentDir()` and is shared, and
+  `lib/ssh-known-hosts.ts` owns the path.** It holds public host keys only, so it
+  is safe on the persisted volume. It has to survive between clones: a per-clone
+  temp file (or `/dev/null`) makes every clone a fresh first-time trust and
+  removes the ability to detect a change. `ensureKnownHostsFile()` opens it
+  **append-only** (truncating would drop every host the user has verified) and
+  `chmod`s it `0o600` on every call, because OpenSSH ignores a group/world-writable
+  known_hosts outright — a file restored from a backup with loose permissions
+  would otherwise fail every clone with "Bad owner or permissions".
+- **One design, no prompt: `accept-new`, no interaction channel.** The clone POST
+  is a one-way NDJSON stream with no round trip and there is no UI surface, so
+  there is nobody to ask. `accept-new` is strictly *safer* than the reference
+  product, not differently unsafe: that one probes with `ssh-keyscan`, asks the
+  browser, and hard-codes `isKeyChanged: false`, so a changed key arrives as an
+  ordinary first-time prompt with no comparison at all. Measured against a real
+  OpenSSH client and a real sshd: a first-seen host is recorded; the same key is
+  not re-added; a changed key **fails** (`REMOTE HOST IDENTIFICATION HAS CHANGED`,
+  known_hosts untouched); an op with no usable identity fails in ~1s with
+  `Permission denied (publickey)`.
+- **Those measurements are not in the suite.** They need a real sshd, which the
+  test image does not have (no `openssh-server`, and the container has no dpkg
+  database), so they were taken with a paramiko harness outside the repo. What the
+  suite *does* pin is every input that decides the behaviour: `accept-new` present
+  and `no`/`off`/`yes`/`/dev/null` absent, the path being the shared one, the
+  file persistent and append-only, and the modes. That is the set of ways the
+  guarantee could be lost in this repo.
 
 ### File access allow-list
 - `/api/files` is intentionally not a general filesystem browser. Allowed roots come from session cwds, their resolved project roots, `~/omp-cwd-*`, and roots explicitly added with `allowFileRoot()`.

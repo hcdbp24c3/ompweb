@@ -5,7 +5,7 @@ import { NextResponse } from "next/server";
 import { apiErrorResponse } from "@/lib/api-utils";
 import { validateGitRef } from "@/lib/git-branch";
 import { cloneDirectoryName } from "@/lib/git-clone";
-import { AmbiguousGitCredentialError, gitCredentialEnv, resolveCredential } from "@/lib/git-credential-resolve";
+import { AmbiguousGitCredentialError, prepareGitCredential, resolveCredential } from "@/lib/git-credential-resolve";
 import { loadGitCredentials } from "@/lib/git-credentials";
 import { ProjectPathError, validateProjectPath } from "@/lib/project-registry";
 import { hostChildEnv } from "@/lib/project-command-env";
@@ -98,31 +98,50 @@ export async function POST(req: Request) {
     if (error instanceof ProjectPathError) return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
     throw error;
   }
+  // Registered before any await so a cancel sent while the target is being
+  // created is not a 404; runGitClone then skips git and the stream cleans up.
+  // It also precedes credential staging, because an ssh credential has to write
+  // a private key to disk — and prepareGitCredential takes this signal so that a
+  // cancel arriving at any point removes it, even though the child's `close` can
+  // arrive much later or never.
+  const controller = new AbortController();
+  clones.set(id, controller);
+  req.signal.addEventListener("abort", () => controller.abort(), { once: true });
+  if (req.signal.aborted) controller.abort();
   // Resolved before the target is created: a store that cannot say which
   // credential this remote wants is refused with a 400 rather than answered by
   // cloning as whichever record happened to be first. The resolution is url-only
   // — a clone target does not exist yet, so there is no cwd to resolve.
-  let credentialEnv: Record<string, string>;
+  let credential: Awaited<ReturnType<typeof resolveCredential>>;
   try {
-    credentialEnv = gitCredentialEnv(await resolveCredential({ url, credentials: loadGitCredentials() }));
+    credential = await resolveCredential({ url, credentials: loadGitCredentials() });
   } catch (error) {
+    clones.delete(id);
     if (error instanceof AmbiguousGitCredentialError) {
       return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
     }
     throw error;
   }
-  // Registered before any await so a cancel sent while the target is being
-  // created is not a 404; runGitClone then skips git and the stream cleans up.
-  const controller = new AbortController();
-  clones.set(id, controller);
-  req.signal.addEventListener("abort", () => controller.abort(), { once: true });
-  if (req.signal.aborted) controller.abort();
+  let credentialEnv: Record<string, string>;
+  let disposeCredential: () => void;
+  try {
+    const prepared = prepareGitCredential(credential, { signal: controller.signal });
+    credentialEnv = prepared.env;
+    disposeCredential = prepared.dispose;
+  } catch (error) {
+    clones.delete(id);
+    // A secret exists but cannot be staged (no writable tmpdir, or the stored
+    // key is not a private key). Refusing beats cloning unauthenticated with a
+    // message that never mentions the credential.
+    return apiErrorResponse(error);
+  }
   // Creating the (empty) target up front makes the existence check atomic, so
   // cleanup only ever removes a directory this request created.
   try {
     await mkdir(target);
   } catch (error) {
     clones.delete(id);
+    disposeCredential();
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
       return NextResponse.json({ error: `Already exists: ${target}`, code: "clone_target_exists" }, { status: 409 });
     }
@@ -138,21 +157,30 @@ export async function POST(req: Request) {
           // Client gone; the clone still finishes its cleanup.
         }
       };
-      const code = await runGitClone(url, target, ref, credentialEnv, controller.signal, (text) => send({ type: "output", text }));
-      clones.delete(id);
-      if (code === 0 && !controller.signal.aborted) {
-        send({ type: "done", path: target });
-      } else {
-        const removed = await rm(target, { recursive: true, force: true, maxRetries: 5 }).then(() => true, () => false);
-        if (!removed) send({ type: "error", error: `Could not remove ${target}`, code: "clone_cleanup_failed" });
-        else if (controller.signal.aborted) send({ type: "cancelled", path: target });
-        else if (code === null) send({ type: "error", error: "Could not run git — is it installed?", code: "git_not_found" });
-        else send({ type: "error", error: `git clone exited with code ${code}`, code: "clone_failed" });
-      }
       try {
-        streamController.close();
-      } catch {
-        // Already closed by a disconnect.
+        const code = await runGitClone(url, target, ref, credentialEnv, controller.signal, (text) => send({ type: "output", text }));
+        clones.delete(id);
+        if (code === 0 && !controller.signal.aborted) {
+          send({ type: "done", path: target });
+        } else {
+          const removed = await rm(target, { recursive: true, force: true, maxRetries: 5 }).then(() => true, () => false);
+          if (!removed) send({ type: "error", error: `Could not remove ${target}`, code: "clone_cleanup_failed" });
+          else if (controller.signal.aborted) send({ type: "cancelled", path: target });
+          else if (code === null) send({ type: "error", error: "Could not run git — is it installed?", code: "git_not_found" });
+          else send({ type: "error", error: `git clone exited with code ${code}`, code: "clone_failed" });
+        }
+      } finally {
+        // Idempotent, and a no-op for a PAT. For an ssh credential this is the
+        // second of two removals: the abort listener already fired if the clone
+        // was cancelled, and a clone that is merely over still needs the key
+        // gone. It runs after the frames are sent, never before, so a `close`
+        // that arrives late cannot pull the key out from under a live ssh.
+        disposeCredential();
+        try {
+          streamController.close();
+        } catch {
+          // Already closed by a disconnect.
+        }
       }
     },
     cancel() {
