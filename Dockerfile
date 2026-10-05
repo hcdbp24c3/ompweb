@@ -63,6 +63,17 @@ FROM node:22-bookworm-slim AS runtime
 # git: omp shells out to git for worktrees and branch state.
 # ca-certificates + curl: omp's installer, and the HTTPS model endpoints.
 # python3: omp's python execution tool.
+# gh: the GitHub CLI, from cli.github.com's own apt repository so it tracks
+#   upstream rather than Debian's older snapshot. It is here ONLY so that `gh`
+#   commands an agent chooses to run can authenticate — omp-web itself never
+#   invokes gh. lib/github-repo.ts emulates gh's remote-priority logic in pure
+#   Node instead, and every git operation goes through git. The token reaches it
+#   the same way every other credential does: resolved per repository by
+#   lib/gh-env.ts and handed to the child that asked for it.
+#
+# The repository is signed, so its archive keyring is fetched first and the
+# sources line names it. An unsigned or keyring-less apt source is how a supply
+# chain gets into an image that also holds credential material.
 #
 # There is deliberately NO git-credential helper script here. A stored git
 # credential (Settings → Extensions & Tools → Git Credentials) reaches git as
@@ -76,6 +87,14 @@ RUN apt-get update \
         curl \
         git \
         python3 \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
 # Pin with --ref v<version> for a reproducible omp; default tracks omp's latest.

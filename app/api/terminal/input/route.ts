@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { getSharedPtyRegistry, TooManyTerminalsError, type TerminalHandle } from "@/lib/terminal/pty-registry";
 import { guardTerminalCwd } from "@/lib/terminal/guard";
+import { ghEnvForSpawn } from "@/lib/gh-env";
 
 export const dynamic = "force-dynamic";
 
@@ -96,8 +97,11 @@ export async function POST(request: Request) {
   let handle: TerminalHandle;
   try {
     // Attach rather than look up: posting to a shell that was reaped should
-    // start a new one, not silently drop the keystroke.
-    handle = registry.attach(cwd, 80, 24);
+    // start a new one, not silently drop the keystroke. That is also why the gh
+    // token is resolved here as well as on the stream route — this attach can
+    // spawn. It is cached per cwd, so the common case (a live shell, where the
+    // override is discarded) costs one map lookup per keystroke.
+    handle = registry.attach(cwd, 80, 24, { env: await ghEnvForSpawn(cwd) });
   } catch (error) {
     if (error instanceof TooManyTerminalsError) {
       return NextResponse.json(

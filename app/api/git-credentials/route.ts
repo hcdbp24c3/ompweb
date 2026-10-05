@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { invalidateGhEnvCache } from "@/lib/gh-env";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import {
   GitCredentialError,
@@ -58,6 +59,7 @@ export async function PUT(request: Request) {
     // saveGitCredential never returns a secret, but the stored record is
     // re-summarized here so a future return-shape change cannot leak one.
     const saved = saveGitCredential(body);
+    invalidateGhEnvCache();
     return NextResponse.json({ success: true, credential: toSummary(saved) });
   } catch (error) {
     return errorResponse(error);
@@ -67,7 +69,9 @@ export async function PUT(request: Request) {
 export async function DELETE(request: Request) {
   try {
     const body = await parseJsonWithinLimit<{ id?: unknown }>(request, MAX_REQUEST_BYTES);
-    return NextResponse.json({ success: true, ...deleteGitCredential(body.id) });
+    const deleted = deleteGitCredential(body.id);
+    invalidateGhEnvCache();
+    return NextResponse.json({ success: true, ...deleted });
   } catch (error) {
     return errorResponse(error);
   }

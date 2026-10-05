@@ -62,8 +62,20 @@ export interface RegistryLimits {
   scrollbackChunks: number;
 }
 
+/** What a caller may add to the shell's environment beyond what this module
+ *  builds. It exists for the repository's resolved gh token
+ *  (lib/gh-env.ts): attach() is synchronous, so the caller resolves the token
+ *  for its cwd first and hands the result in — the registry never reads the
+ *  credential store itself.
+ *
+ *  The merge happens INSIDE the sanitize call rather than on a finished env, so
+ *  an override cannot put back a host variable sanitize removes. */
+export interface AttachOptions {
+  env?: Record<string, string>;
+}
+
 export interface PtyRegistry {
-  attach(cwd: string, cols: number, rows: number): TerminalHandle;
+  attach(cwd: string, cols: number, rows: number, options?: AttachOptions): TerminalHandle;
   detach(cwd: string): void;
   disposeAll(): void;
   count(): number;
@@ -198,7 +210,7 @@ export function createPtyRegistry(
     entry.idleTimer.unref?.();
   }
 
-  function attach(cwd: string, cols: number, rows: number): TerminalHandle {
+  function attach(cwd: string, cols: number, rows: number, options: AttachOptions = {}): TerminalHandle {
     const existing = entries.get(cwd);
     if (existing?.live) {
       syncIdle(cwd, existing);
@@ -216,6 +228,11 @@ export function createPtyRegistry(
     // a shell that can echo it hands the guard to anyone who gets a keystroke
     // through. sanitizeProjectCommandEnvironment knows nothing about it, so it is
     // removed here rather than widened there.
+    //
+    // The caller's override is merged here, not applied afterwards, so it goes
+    // through the same sanitize: a resolved gh token arrives exactly like every
+    // other inherited variable, and nothing can smuggle a host secret back in
+    // through the new parameter.
     const env = sanitizeProjectCommandEnvironment({
       ...process.env,
       TERM: "xterm-256color",
@@ -224,6 +241,7 @@ export function createPtyRegistry(
       // see CI switch off spinners, progress bars and colour — exactly the
       // feedback an interactive shell needs.
       CI: "",
+      ...options.env,
     });
     delete env.OMP_WEB_PASSWORD;
 

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSharedPtyRegistry, TooManyTerminalsError, type TerminalHandle } from "@/lib/terminal/pty-registry";
 import { guardTerminalCwd } from "@/lib/terminal/guard";
+import { ghEnvForSpawn } from "@/lib/gh-env";
 
 export const dynamic = "force-dynamic";
 
@@ -34,7 +35,10 @@ export async function GET(request: Request) {
 
   let handle: TerminalHandle;
   try {
-    handle = registry.attach(cwd, cols, rows);
+    // The gh token for this repository, resolved before attach because attach is
+    // synchronous. Cached per cwd in lib/gh-env.ts, so re-opening the panel costs
+    // one map lookup rather than a credential-store read and a git spawn.
+    handle = registry.attach(cwd, cols, rows, { env: await ghEnvForSpawn(cwd) });
   } catch (error) {
     if (error instanceof TooManyTerminalsError) {
       return NextResponse.json(

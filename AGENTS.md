@@ -70,6 +70,7 @@ app/api/
   default-cwd/route.ts            POST create ~/omp-cwd-YYYYMMDD
   files/[...path]/route.ts        GET file contents for viewer
   github-repo/route.ts            GET ?cwd= — GitHub owner/repo of the checkout (for #N links)
+  git-credentials/gh-env/route.ts GET ?cwd= — { GH_TOKEN, GITHUB_TOKEN } this repo resolves to
   home/route.ts                   GET user home directory
   models/route.ts                 GET { models, modelList, defaultModel }
   models-config/route.ts          GET/PUT — read/write ~/.omp/agent/models.yml
@@ -97,6 +98,7 @@ lib/
   file-paths.ts        client/server path encoding helpers
   github-refs.ts       remark plugin linking #N / owner/repo#N + GithubRepoContext
   git-clone.ts         pure clone helpers: URL→directory name (https/ssh only), \r-aware progress log
+  gh-env.ts             per-cwd { GH_TOKEN, GITHUB_TOKEN } for a child that may run gh
   github-repo.ts       server: pick the gh-default GitHub remote from git config
   markdown.ts          shared markdown helpers
   npx.ts               npx runner used by skill install
@@ -434,6 +436,15 @@ handled or safely ignored.
   and `no`/`off`/`yes`/`/dev/null` absent, the path being the shared one, the
   file persistent and append-only, and the modes. That is the set of ways the
   guarantee could be lost in this repo.
+
+### `gh` in the image, and the token it is given (`lib/gh-env.ts`)
+- `gh` is installed in the **runtime** stage only, from cli.github.com's own apt repo with its archive keyring (`signed-by=`), and the apt lists are purged in the same RUN. omp-web **never invokes `gh`** — `lib/github-repo.ts` emulates gh's remote-priority logic in pure Node on purpose and every git operation still goes through git. `gh` exists so that `gh` commands *an agent* runs can authenticate.
+- `lib/gh-env.ts` is the single place a gh token is resolved, and it reuses task 09's `resolveCredential({ cwd })` — so `user1/repo1` gets user1's token and `user2/repo2` gets user2's. Two entry points with deliberately different failure behaviour: `resolveGhEnvForCwd` throws `AmbiguousGitCredentialError` (a caller that asked can be told), `ghEnvForSpawn` answers `{}` and never throws (a shell that will not open is worse than a shell whose `gh` runs unauthenticated, which fails with gh's own message).
+- **Per-cwd is the whole point.** An ambient `GH_TOKEN` would put one account into every unrelated repository's agent. `GH_TOKEN`/`GITHUB_TOKEN` are gh's own names and carry no `OMP_WEB_` prefix, so they survive `hostChildEnv`; the resolved token overrides an inherited one, and where nothing resolves the operator's own variable is left exactly as they set it (it is their credential, like `OPENAI_API_KEY`). Both halves are pinned in `lib/terminal/pty-registry.test.mjs`.
+- **An ssh credential delivers nothing here.** gh talks to the HTTPS API, so a private key in `GH_TOKEN` would be *sent to api.github.com* as a bearer credential. The type check is load-bearing against a hand-edited store, not against the writer — `secretFieldsFor` keeps tokens off ssh records, so `lib/gh-env.test.mjs` supplies that shape deliberately.
+- **Two delivery points, and neither is a route.** The omp child (`lib/rpc-manager.ts`, both `new RpcProcess` sites, via the existing `RpcProcessOptions.env`) and the terminal (`lib/terminal/pty-registry.ts`, `attach(cwd, cols, rows, { env })` from the stream and input routes). `attach()` is synchronous and the resolution is not, which is why the caller resolves and hands it in; the override is merged **inside** the sanitize call so it cannot reintroduce a stripped host variable. `lib/omp/rpc-process.ts` needs no change — `RpcProcessOptions.env` already merges over `process.env` and its own runtime test pins that these names survive.
+- The per-cwd cache exists because the input route attaches on **every keystroke**; it is 5s like `lib/file-access.ts`, and `/api/git-credentials` drops it on every write. `lib/git-credentials.ts` cannot drop it itself (that import would be a cycle), so the route is the only production writer that does.
+- `/api/git-credentials/gh-env?cwd=` exists for the settings surface, not for the delivery. It is the **only route in the app that returns a decrypted token to the browser** — `proxy.ts`'s single web-password gate and the cwd allowlist are what bound it. If that tradeoff is ever revisited, the honest question is not "is it behind auth" but "does anything need a browser to hold this", because nothing does today.
 
 ### File access allow-list
 - `/api/files` is intentionally not a general filesystem browser. Allowed roots come from session cwds, their resolved project roots, `~/omp-cwd-*`, and roots explicitly added with `allowFileRoot()`.
