@@ -4,6 +4,7 @@ import { homedir } from "os";
 import { validateAgentImages } from "./image-attachments";
 import { hasVisibleAssistantContent } from "./assistant-response";
 import { invalidateModelsCache } from "./models-cache";
+import { ghEnvForSpawn } from "./gh-env";
 import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
 import { readNativeSettings } from "./omp/settings-config";
 import {
@@ -1133,6 +1134,12 @@ export class AgentSessionWrapper {
       const proc = new RpcProcess({
         cwd: this.cwd,
         extraArgs: buildSessionSpawnArgs(resumable ? sessionFile : "", undefined, this.advisorSpawned, launchConfigForCwd(this.cwd)),
+        // Resolved for this session's cwd, so an agent running `gh` here acts as
+        // the account this repository belongs to. Never throws — a store it
+        // cannot read leaves the child without a token rather than failing to
+        // start. See lib/gh-env.ts; RpcProcessOptions.env is the seam, and its
+        // own test pins that these names survive sanitization.
+        env: await ghEnvForSpawn(this.cwd),
         onExit: (info) => {
           if (this.proc === proc) this.handleProcessExit(info, proc);
         },
@@ -1785,6 +1792,12 @@ export async function startRpcSession(
     const proc = new RpcProcess({
       cwd,
       extraArgs: buildSessionSpawnArgs(sessionFile, toolNames, advisor === true, launchConfig),
+      // `gh` runs inside this child (and inside every grandchild the agent
+      // starts), so the token the repository resolves to has to be in its
+      // environment at spawn. Per-cwd, because two sessions in two repositories
+      // must not share an account — and an empty answer is a normal outcome,
+      // not a failure, so it never throws.
+      env: await ghEnvForSpawn(cwd),
       onExit: (info) => holder.wrapper?.handleProcessExit(info, proc),
     });
     const created = new AgentSessionWrapper(
