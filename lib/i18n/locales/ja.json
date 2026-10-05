@@ -1615,5 +1615,7 @@
   "gitChanges.filesChanged.other": "変更 {count} ファイル",
   "sessionSidebar.collapseExplorer": "すべてのフォルダーを折りたたむ",
   "sessionSidebar.explorerChanged": "変更 {count} ファイル",
-  "sessionSidebar.explorerClean": "Git ワーキングツリーに変更なし"
+  "sessionSidebar.explorerClean": "Git ワーキングツリーに変更なし",
+  "modelsConfig.resolvedModelsCaption": "omp が解決したモデル（models.yml には保存されていません）",
+  "modelsConfig.noModelsResolved": "モデルが解決されていません。上の「Add Model」または「Catalog」で設定してください。"
 }

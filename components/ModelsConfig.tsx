@@ -2542,7 +2542,20 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                   ) : (
                     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                       {providers.map(([pName, pData]) => {
+                        // Two sources, and they are not the same thing. `models` is
+                        // what models.yml persists: each chip below is a button that
+                        // opens the index-addressed editor for that entry, so every
+                        // chip is editable by construction. `resolved` is what omp
+                        // itself resolved (built-in catalog plus anything a
+                        // `discovery:` probe found) and reported over /api/models,
+                        // joined on `model.provider` being the provider key — a
+                        // discovery-only provider persists no models at all, which is
+                        // why this card used to read as empty while the composer
+                        // listed dozens. Nothing resolved may be a chip: there is no
+                        // models[] entry behind it to address, and `CHIPS_VISIBLE`
+                        // must keep counting persisted models only.
                         const models = pData.models ?? [];
+                        const resolved = runtimeModelsByProvider[pName] ?? [];
                         return (
                           <div key={pName} className="settings-card" style={{ flexDirection: "column", alignItems: "stretch", gap: 12 }}>
                             <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
@@ -2590,7 +2603,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                               </div>
                             </div>
 
-                            {/* Models chips */}
+                            {/* Models persisted in models.yml — one chip each. */}
                             {models.length > 0 ? (() => {
                               const expanded = expandedChips.has(pName);
                               const hidden = !expanded && models.length > CHIPS_VISIBLE;
@@ -2644,9 +2657,48 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                                   )}
                                 </div>
                               );
-                            })() : (
+                            })() : null}
+
+                            {/* Resolved by omp — shown, never editable. Bounded because
+                                a discovery provider can resolve hundreds, which is the
+                                reason the chips above are capped at all. */}
+                            {resolved.length > 0 && (
+                              <div
+                                style={{
+                                  display: "flex", flexDirection: "column", gap: 4,
+                                  paddingTop: 6, borderTop: models.length > 0 ? "none" : "1px solid var(--border)",
+                                }}
+                              >
+                                <div style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("modelsConfig.resolvedModelsCaption")}</div>
+                                <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 2, maxHeight: 180, overflowY: "auto" }}>
+                                  {resolved.map((model) => {
+                                    const suffix = modelIdSuffix(model.name, model.id);
+                                    return (
+                                      <li
+                                        key={`${model.provider}:${model.id}`}
+                                        data-model-source="resolved"
+                                        style={{
+                                          display: "flex", alignItems: "baseline", gap: 6,
+                                          fontSize: 11.5, fontFamily: "var(--font-mono)", color: "var(--text-muted)",
+                                          overflowWrap: "anywhere",
+                                        }}
+                                      >
+                                        <span>{modelLabel(model.name, model.id)}</span>
+                                        {suffix && <span style={{ opacity: 0.7 }}>{suffix}</span>}
+                                      </li>
+                                    );
+                                  })}
+                                </ul>
+                              </div>
+                            )}
+
+                            {/* Empty only when neither source has anything. Held back
+                                while omp's registry is still loading — "no models
+                                resolved" is a claim about omp, and it must not be made
+                                before omp has answered. */}
+                            {models.length === 0 && resolved.length === 0 && !runtimeModelsLoading && (
                               <div style={{ fontSize: 11.5, color: "var(--text-dim)", paddingTop: 4, borderTop: "1px solid var(--border)" }}>
-                                No models defined yet. Click &quot;Add Model&quot; or &quot;Catalog&quot; above to configure models.
+                                {t("modelsConfig.noModelsResolved")}
                               </div>
                             )}
                           </div>

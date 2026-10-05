@@ -1615,5 +1615,7 @@
   "gitChanges.filesChanged.other": "{count} 个改动的文件",
   "sessionSidebar.collapseExplorer": "折叠所有文件夹",
   "sessionSidebar.explorerChanged": "{count} 个改动的文件",
-  "sessionSidebar.explorerClean": "Git 工作区干净"
+  "sessionSidebar.explorerClean": "Git 工作区干净",
+  "modelsConfig.resolvedModelsCaption": "由 omp 解析得到 — 未保存到 models.yml",
+  "modelsConfig.noModelsResolved": "未解析到模型。请点击上方的 \"Add Model\" 或 \"Catalog\" 进行配置。"
 }
