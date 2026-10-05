@@ -6,6 +6,7 @@ import { useModalDialog } from "@/hooks/useModalDialog";
 import { useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { appendProgress, cloneDirectoryName } from "@/lib/git-clone";
+import { validateGitRef } from "@/lib/git-branch";
 
 interface DirectoryEntry {
   name: string;
@@ -74,6 +75,7 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
   const [extraArgs, setExtraArgs] = useState("");
   const [loading, setLoading] = useState(true);
   const [cloneUrl, setCloneUrl] = useState("");
+  const [cloneBranch, setCloneBranch] = useState("");
   const [cloneId, setCloneId] = useState<string | null>(null);
   const [cloneLog, setCloneLog] = useState("");
   const [cloneStatus, setCloneStatus] = useState<string | null>(null);
@@ -125,8 +127,12 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
   };
   const hasUncommittedPath = pathInput.trim() !== currentPath;
   const cloneName = cloneUrl.trim() ? cloneDirectoryName(cloneUrl) : null;
+  // The same rule the route applies, so an impossible ref never starts a clone.
+  // The server re-checks it: this only saves a round trip.
+  const cloneRef = validateGitRef(cloneBranch);
+  const cloneRefRejected = Boolean(cloneBranch.trim()) && cloneRef === null;
   const cloneTarget = cloneName && currentPath ? `${currentPath.replace(/[\\/]+$/, "")}${currentPath.includes("\\") ? "\\" : "/"}${cloneName}` : null;
-  const canSelect = Boolean(currentPath) && !hasUncommittedPath && !locked && (!cloneUrl.trim() || cloneName !== null);
+  const canSelect = Boolean(currentPath) && !hasUncommittedPath && !locked && !cloneRefRejected && (!cloneUrl.trim() || cloneName !== null);
   const canNavigateUp = Boolean(parentDirectory) || isWindowsDriveRoot(currentPath);
   const submitSelection = async () => {
     const args = extraArgs.split("\n").map((arg) => arg.trim()).filter(Boolean);
@@ -146,7 +152,7 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
       const response = await fetch("/api/projects/clone", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, parent: currentPath, url: cloneUrl.trim() }),
+        body: JSON.stringify({ id, parent: currentPath, url: cloneUrl.trim(), ...(cloneRef ? { branch: cloneRef } : {}) }),
         signal: abort.signal,
       });
       cloneRespondedRef.current = true;
@@ -171,6 +177,7 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
             setCloneStatus(t("directoryPicker.cloneSucceeded", { path: frame.path }));
             // If registering fails, "Select this folder" can retry on the clone.
             setCloneUrl("");
+            setCloneBranch("");
             void navigateTo(frame.path);
             onSelect(frame.path, launchConfig);
             return;
@@ -330,9 +337,14 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
             <span style={{ flex: 1, height: 1, background: "var(--border)" }} aria-hidden="true" />
           </div>
           <input className="directory-picker-clone-url" type="text" value={cloneUrl} disabled={cloning} onChange={(event) => { setCloneUrl(event.target.value); setCloneStatus(null); }} placeholder={t("directoryPicker.cloneUrlPlaceholder")} aria-label={t("directoryPicker.cloneUrlLabel")} autoComplete="off" spellCheck={false} style={{ width: "100%", height: 30, boxSizing: "border-box", marginBottom: 7, padding: "0 8px", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11 }} />
+          {/* Same width and rhythm as the URL field, so it reads as part of the
+              same form; git takes a branch, a tag or a commit SHA alike. */}
+          <input className="directory-picker-clone-branch" type="text" value={cloneBranch} disabled={cloning} onChange={(event) => { setCloneBranch(event.target.value); setCloneStatus(null); }} placeholder={t("directoryPicker.cloneBranchPlaceholder")} aria-label={t("directoryPicker.cloneBranchLabel")} autoComplete="off" spellCheck={false} style={{ width: "100%", height: 30, boxSizing: "border-box", marginBottom: 7, padding: "0 8px", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11 }} />
           {cloneUrl.trim() && !cloning && !cloneStatus && (
-            <div style={{ marginBottom: 7, color: cloneTarget ? "var(--text-muted)" : "var(--status-error)", fontSize: 11, overflowWrap: "anywhere" }}>
-              {cloneTarget ? t("directoryPicker.cloneInto", { path: cloneTarget }) : t("errors.invalid_git_url")}
+            <div style={{ marginBottom: 7, color: cloneTarget && !cloneRefRejected ? "var(--text-muted)" : "var(--status-error)", fontSize: 11, overflowWrap: "anywhere" }}>
+              {cloneTarget && !cloneRefRejected
+                ? t("directoryPicker.cloneInto", { path: cloneTarget })
+                : t(cloneName ? "errors.invalid_git_ref" : "errors.invalid_git_url")}
             </div>
           )}
           {cloneStatus && <div role="status" style={{ marginBottom: 7, color: "var(--text-muted)", fontSize: 11, overflowWrap: "anywhere" }}>{cloneStatus}</div>}

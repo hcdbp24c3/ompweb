@@ -3,6 +3,7 @@ import { mkdir, rm } from "fs/promises";
 import { join } from "path";
 import { NextResponse } from "next/server";
 import { apiErrorResponse } from "@/lib/api-utils";
+import { validateGitRef } from "@/lib/git-branch";
 import { cloneDirectoryName } from "@/lib/git-clone";
 import { ProjectPathError, validateProjectPath } from "@/lib/project-registry";
 import { hostChildEnv } from "@/lib/project-command-env";
@@ -23,12 +24,15 @@ type CloneFrame =
  *  On POSIX git leads its own session (no controlling terminal, so ssh fails
  *  fast on host-key or passphrase prompts instead of blocking on /dev/tty) and
  *  cancel signals the whole group: ssh/remote helpers hold the output pipes
- *  open, so killing git alone would leave the clone hanging until they exit. */
-function runGitClone(url: string, target: string, signal: AbortSignal, onOutput: (text: string) => void): Promise<number | null> {
+ *  open, so killing git alone would leave the clone hanging until they exit.
+ *  `ref` (already validated) goes before the `--`, which ends option parsing:
+ *  after it, `--branch` would be read as the repository URL and `ref` as the
+ *  target directory. It never reaches the target name, which comes from the URL. */
+function runGitClone(url: string, target: string, ref: string | null, signal: AbortSignal, onOutput: (text: string) => void): Promise<number | null> {
   // Aborted while the target was being created: skip git; the caller cleans up.
   if (signal.aborted) return Promise.resolve(null);
   const { promise, resolve } = Promise.withResolvers<number | null>();
-  const child = spawn("git", ["clone", "--progress", "--", url, target], {
+  const child = spawn("git", ["clone", "--progress", ...(ref ? ["--branch", ref] : []), "--", url, target], {
     stdio: ["ignore", "pipe", "pipe"],
     // An empty GIT_ASKPASS also overrides core.askPass/SSH_ASKPASS fallbacks.
     env: hostChildEnv({ GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS: "", GIT_ALLOW_PROTOCOL: "https:ssh" }),
@@ -58,12 +62,13 @@ function runGitClone(url: string, target: string, signal: AbortSignal, onOutput:
   return promise;
 }
 
-// POST /api/projects/clone  body: { id, parent, url }
-// Clones `url` into `<parent>/<repo name>` and streams NDJSON frames:
-// output chunks, then exactly one of done / cancelled / error. The target is
-// removed on failure or cancellation (DELETE, or the client disconnecting).
+// POST /api/projects/clone  body: { id, parent, url, branch? }
+// Clones `url` into `<parent>/<repo name>` — the name comes from the URL alone,
+// never from `branch` — and streams NDJSON frames: output chunks, then exactly
+// one of done / cancelled / error. The target is removed on failure or
+// cancellation (DELETE, or the client disconnecting).
 export async function POST(req: Request) {
-  let body: { id?: unknown; parent?: unknown; url?: unknown };
+  let body: { id?: unknown; parent?: unknown; url?: unknown; branch?: unknown };
   try {
     body = await req.json();
   } catch {
@@ -72,8 +77,14 @@ export async function POST(req: Request) {
   const id = typeof body.id === "string" && CLONE_ID.test(body.id) ? body.id : null;
   const url = typeof body.url === "string" ? body.url.trim() : "";
   const name = cloneDirectoryName(url);
+  // Optional branch, tag or commit. Re-checked here, not trusted from the
+  // browser: an absent or blank value means the default branch, anything else
+  // that is not a ref git could take is refused before a directory is created.
+  const requestedRef = typeof body.branch === "string" ? body.branch.trim() : "";
+  const ref = validateGitRef(requestedRef);
   if (!id || clones.has(id)) return NextResponse.json({ error: "Invalid request", code: "invalid_request" }, { status: 400 });
   if (!name) return NextResponse.json({ error: "Enter an https:// or ssh Git URL", code: "invalid_git_url" }, { status: 400 });
+  if (requestedRef && !ref) return NextResponse.json({ error: "Enter a valid branch, tag or commit", code: "invalid_git_ref" }, { status: 400 });
   let target: string;
   try {
     target = join(validateProjectPath(typeof body.parent === "string" ? body.parent : ""), name);
@@ -108,7 +119,7 @@ export async function POST(req: Request) {
           // Client gone; the clone still finishes its cleanup.
         }
       };
-      const code = await runGitClone(url, target, controller.signal, (text) => send({ type: "output", text }));
+      const code = await runGitClone(url, target, ref, controller.signal, (text) => send({ type: "output", text }));
       clones.delete(id);
       if (code === 0 && !controller.signal.aborted) {
         send({ type: "done", path: target });
