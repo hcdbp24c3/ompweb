@@ -137,9 +137,18 @@ export function materializeSshKey(privateKey: string, options: { signal?: AbortS
     chmodSync(keyPath, 0o600);
     // A filesystem that accepts the call and then ignores the mode is the one
     // case chmod cannot report, and it fails much later as an opaque ssh error.
-    const mode = statSync(keyPath).mode & 0o777;
-    if (mode !== 0o600) {
-      throw new SshKeyError("ssh_key_insecure", `${keyPath} ended up ${mode.toString(8)}, not 600 — ssh refuses a readable identity file`);
+    //
+    // Windows is excluded, and it is not a gap in the check: Node synthesises
+    // 0o666 for every ordinary Windows file because NTFS has no POSIX
+    // permission bits, so `mode` is always 0o666 there whatever chmod does and
+    // OpenSSH-for-Windows reads the identity through Win32 without enforcing a
+    // POSIX mode. The per-user temp directory plus inherited NTFS ACLs are the
+    // isolation there. Asserting it made every SSH credential fail on Windows.
+    if (process.platform !== "win32") {
+      const mode = statSync(keyPath).mode & 0o777;
+      if (mode !== 0o600) {
+        throw new SshKeyError("ssh_key_insecure", `${keyPath} ended up ${mode.toString(8)}, not 600 — ssh refuses a readable identity file`);
+      }
     }
   } catch (error) {
     dispose();
