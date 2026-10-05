@@ -1594,6 +1594,7 @@
   "appShell.resizeFilePanel": "调整文件面板大小",
   "appShell.resizeFilePanelTitle": "拖动以调整文件面板宽度。双击或按 Enter 恢复默认宽度。",
   "composerContext.title": "上下文",
+  "composerContext.close": "关闭",
   "composerContext.windowSize": "{tokens} 窗口",
   "composerContext.maxOutput": "最大输出 {tokens}",
   "composerContext.speed": "{current} t/s · 平均 {average}",

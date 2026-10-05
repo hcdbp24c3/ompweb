@@ -1,8 +1,10 @@
+import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react/pure.js";
 import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, {
@@ -12,6 +14,21 @@ const jiti = createJiti(import.meta.url, {
 const { ChatInput, ModelErrorBanner, filterModelOptions } = await jiti.import("./ChatInput.tsx");
 const { ModelPickerPanel } = await jiti.import("./ChatInput-model-picker.tsx");
 const { setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+
+// jsdom has no matchMedia; the composer reads `(pointer: fine)` to decide
+// whether to paint ghost text. A "fine" pointer keeps the SSR cases below
+// rendering what a desktop browser renders.
+window.matchMedia = () => ({
+  matches: true,
+  media: "",
+  onchange: null,
+  addEventListener() {},
+  removeEventListener() {},
+  addListener() {},
+  removeListener() {},
+});
+
+afterEach(cleanup);
 
 /** The picker's left pane only renders one provider at a time, so keep the
  *  fixture helpers on the current model rather than relying on rail order. */
@@ -400,4 +417,71 @@ test("model selector trigger names the full provider/id selector", () => {
 
   assert.match(html, /aria-label="(Change model|chatInput\.changeModel): [^"]*codex\/gpt-5\.6-sol[^"]*"/);
   assert.match(html, /title="(Change model|chatInput\.changeModel): [^"]*codex\/gpt-5\.6-sol[^"]*"/);
+});
+
+// An anchored composer popover has no focusable element to reach for, so a
+// popover that cannot be dismissed from its own chrome strands anyone on
+// keyboard-only navigation. `onCompact` is what renders the ring at all.
+
+/** A composer with the context ring mounted and its popover reportable. */
+function renderContextRing(props) {
+  return render(React.createElement(ChatInput, {
+    onSend() {},
+    onAbort() {},
+    onCompact() {},
+    isStreaming: false,
+    contextUsage: { percent: 42, contextWindow: 200000, tokens: 84000 },
+    ...props,
+  }));
+}
+
+const ringTrigger = () => screen.getByRole("button", { name: "Context" });
+
+/** Both probes below report plain values on purpose. `node:assert` inspects its
+ *  operands to build a failure message, and inspecting a jsdom element exhausts
+ *  the heap — the OOM kill looks like a hung suite, not a bad assertion. */
+const contextPopoverState = () => (screen.queryByRole("dialog", { name: "Context" }) ? "open" : "closed");
+const focused = () => {
+  const el = document.activeElement;
+  if (!el || el === document.body) return "body";
+  return el.getAttribute("aria-label") ?? el.tagName;
+};
+
+test("the context popover closes from its own close button and hands focus to the ring", async () => {
+  renderContextRing();
+  const ring = ringTrigger();
+
+  await act(async () => { fireEvent.click(ring); });
+  const close = within(screen.getByRole("dialog", { name: "Context" })).getByRole("button", { name: "Close" });
+  // A real mousedown focuses the button it hits, so the popover unmounts while
+  // its close button still holds focus — handing the ring back is then the only
+  // way left to reach the trigger.
+  close.focus();
+  await act(async () => { fireEvent.click(close); });
+
+  assert.equal(contextPopoverState(), "closed");
+  assert.equal(focused(), "Context");
+});
+
+test("Escape closes the context popover, from the ring and from the composer, without aborting", async () => {
+  let aborts = 0;
+  renderContextRing({ isStreaming: true, onAbort() { aborts += 1; } });
+  const ring = ringTrigger();
+
+  // Opening it by mouse leaves focus on the ring, where the composer's own
+  // onKeyDown never runs — only a document listener can see that Escape.
+  await act(async () => { fireEvent.click(ring); });
+  ring.focus();
+  await act(async () => { fireEvent.keyDown(ring, { key: "Escape" }); });
+  assert.equal(contextPopoverState(), "closed");
+  assert.equal(focused(), "Context");
+
+  // With focus inside the composer the popover takes the Escape, and the
+  // composer-wide "Esc stops the agent" must not fire behind it.
+  await act(async () => { fireEvent.click(ring); });
+  const composer = screen.getByRole("textbox", { name: "Message composer" });
+  composer.focus();
+  await act(async () => { fireEvent.keyDown(composer, { key: "Escape" }); });
+  assert.equal(contextPopoverState(), "closed");
+  assert.equal(aborts, 0);
 });
