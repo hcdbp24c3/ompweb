@@ -1615,5 +1615,7 @@
   "messageView.stopSpeech": "Stop speaking",
   "settingsConfig.ttsNotSupported": "Not supported in this browser",
   "modelsConfig.chipsMore": "+{count} more",
-  "modelsConfig.chipsFewer": "Show fewer"
+  "modelsConfig.chipsFewer": "Show fewer",
+  "modelsConfig.resolvedModelsCaption": "Resolved by omp — not saved in models.yml",
+  "modelsConfig.noModelsResolved": "No models resolved. Click \"Add Model\" or \"Catalog\" above to configure models."
 }
