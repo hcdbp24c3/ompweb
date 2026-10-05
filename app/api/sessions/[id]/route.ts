@@ -24,6 +24,7 @@ import {
   readSessionHeader,
   SessionFileTooLargeError,
 } from "@/lib/session-reader";
+import { MAX_SYNC_MESSAGES } from "@/lib/session-sync";
 import { resolveSessionPathOr404 } from "@/lib/api-utils";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { sessionPathKey } from "@/lib/paths";
@@ -228,6 +229,14 @@ export async function GET(
       parentSessionId,
     };
 
+    // The transcript is the bulk of this response and the chat pages through
+    // /context, so a long session must not receive it here as well. A session
+    // that fits in one page is still served whole — that is the common case, and
+    // serving it keeps every ordinary open to a single request. Anything longer
+    // is omitted unless a caller asks for the whole body: non-lazy flows (copy
+    // transcript, anything that needs every message at once) must say so.
+    const includeContext = searchParams.has("context") || context.entryIds.length <= MAX_SYNC_MESSAGES;
+
     // ?includeState=1 inlines the wrapper's live agent state (same shape as
     // GET /api/agent/[id]) so the client's post-turn refresh is one request
     // instead of two. On a get_state failure the field is omitted entirely —
@@ -252,7 +261,7 @@ export async function GET(
       info,
       leafId,
       tree,
-      context,
+      ...(includeContext ? { context } : {}),
       ...(agent ? { agent } : {}),
     });
   } catch (error) {

@@ -30,7 +30,7 @@ import type { HostToolDefinition, HostUriSchemeDefinition, RpcAskDialogAnswer, R
 import { isRecord } from "@/lib/type-guards";
 import { subscribeSessionsChanged } from "@/lib/session-change-bus";
 import { createSessionCatchUp, type SessionCatchUp, type SessionLiveFields } from "./useAgentSession-sync";
-import type { SessionLiveSnapshot } from "@/lib/session-sync";
+import type { SessionLiveSnapshot, SessionSyncResponse } from "@/lib/session-sync";
 import {
   mergeSubagentRoster,
   parseSubagentActivityEvent,
@@ -161,6 +161,28 @@ function readTerminalAgentError(event: AgentEvent): string | null {
     }
   }
   return null;
+}
+
+/**
+ * One page of display history: the newest window, because there is nothing to
+ * walk forward from on a first read. Used only when `/api/sessions/[id]` omitted
+ * its transcript because the session does not fit in a single page — an ordinary
+ * session still comes back whole and never pays for this second request.
+ */
+async function fetchHistoryWindow(
+  sid: string,
+  view: { leafId: string | null; includePreCompaction: boolean },
+): Promise<SessionContext> {
+  const params = new URLSearchParams({ sync: "1", tail: "1", deferThinking: "1", deferMedia: "1" });
+  if (view.leafId) params.set("leafId", view.leafId);
+  if (view.includePreCompaction) params.set("includePreCompaction", "1");
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/context?${params}`, { signal: AbortSignal.timeout(30_000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const page = await res.json() as SessionSyncResponse;
+  if (page.sessionId !== sid) throw new Error("History page belongs to another session");
+  if (page.mode !== "replace" && page.mode !== "append") throw new Error("Unexpected history page mode");
+  if (page.context.messages.length !== page.context.entryIds.length) throw new Error("History page is not aligned");
+  return page.context;
 }
 
 export interface UseAgentSessionOptions {
@@ -451,7 +473,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const setToolPresetState = opts.setToolPreset ?? setToolPreset;
 
-  const currentModel = currentModelOverride ?? data?.context.model ?? pendingModel ?? null;
+  const currentModel = currentModelOverride ?? data?.context?.model ?? pendingModel ?? null;
   // For existing sessions, the live state's resolved model wins over the
   // session file's entry: omp may have fallen back to the default model when
   // the recorded one is gone (disabled provider, renamed id), and the file
@@ -465,8 +487,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         ? (newSessionModel ?? newSessionDefaultModel)
         : (currentModelOverride ?? (liveModelMeta
             ? { provider: liveModelMeta.provider, modelId: liveModelMeta.modelId }
-            : data?.context.model ?? pendingModel)),
-    [isNew, newSessionModel, newSessionDefaultModel, currentModelOverride, liveModelMeta, data?.context.model, pendingModel],
+            : data?.context?.model ?? pendingModel)),
+    [isNew, newSessionModel, newSessionDefaultModel, currentModelOverride, liveModelMeta, data?.context?.model, pendingModel],
   );
 
   const sessionStats = useMemo(() => {
@@ -750,16 +772,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // of a run that started while this fetch was in flight (it would delete
       // the new run's optimistic user bubble).
       if (fenceRunId !== undefined && promptRunIdRef.current !== fenceRunId) return null;
-      if (catchUp.view().leafId || catchUp.view().includePreCompaction) {
+      const view = catchUp.view();
+      if (view.leafId || view.includePreCompaction) {
+        // A transcript too long for one page arrives without a body; open the
+        // newest page of the selected view before draining forward from it.
+        if (!d.context) d.context = catchUp.seed(await fetchHistoryWindow(sid, view), position);
+        if (sessionIdRef.current !== sid || contextRequestSeqRef.current !== requestSeq || promptRunIdRef.current !== requestRun) return null;
         await catchUp.request();
         if (sessionIdRef.current !== sid || contextRequestSeqRef.current !== requestSeq || promptRunIdRef.current !== requestRun) return null;
         d.context = catchUp.history() ?? d.context;
-        setShowPreCompactionHistory(catchUp.view().includePreCompaction);
+        setShowPreCompactionHistory(view.includePreCompaction);
       } else {
-        const fullContext = d.context;
+        const fullContext = d.context ?? await fetchHistoryWindow(sid, view);
+        if (sessionIdRef.current !== sid || contextRequestSeqRef.current !== requestSeq || promptRunIdRef.current !== requestRun) return null;
         d.context = catchUp.seed(fullContext, position);
         if (d.context === fullContext) setActiveLeafId(d.leafId);
         setShowPreCompactionHistory(false);
+      }
+      if (!d.context) {
+        // Unreachable: a session that arrived without a body was just seeded from
+        // a page, and a seed always returns one. Failing loudly beats opening an
+        // empty chat if that ever stops being true.
+        throw new Error("Session load produced no history");
       }
       setData(d);
       // Recover on-disk subagent history (task toolResults) for this session —
@@ -857,7 +891,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const url = `/api/sessions/${encodeURIComponent(sid)}/context?${params}`;
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const d = await res.json() as Pick<SessionData, "context">;
+      // This route always answers a whole context (it is not the paged read), so
+      // unlike SessionData its body is not optional.
+      const d = await res.json() as { context: SessionContext };
       // Fence like loadSession: drop the response if the session changed or a
       // newer navigate started while this request was in flight.
       if (sessionIdRef.current !== sid || contextRequestSeqRef.current !== seq || promptRunIdRef.current !== runId) return false;

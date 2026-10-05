@@ -24,7 +24,12 @@ export interface SessionData {
   filePath: string;
   tree: SessionTreeNode[];
   leafId: string | null;
-  context: {
+  /**
+   * Absent when the session's transcript does not fit in one history page: the
+   * route omits it rather than shipping a body the chat is about to page through,
+   * and the caller reads `/context?sync=1&tail=1` for the newest page instead.
+   */
+  context?: {
     messages: AgentMessage[];
     entryIds: string[];
     thinkingLevel: string;
