@@ -215,6 +215,7 @@
   "providerUsage.resets": "resets {value}",
   "appShell.providerUsageButton": "Provider usage limits",
   "composerContext.title": "Context",
+  "composerContext.close": "Close",
   "composerContext.windowSize": "{tokens} window",
   "composerContext.maxOutput": "max out {tokens}",
   "composerContext.speed": "{current} t/s · avg {average}",

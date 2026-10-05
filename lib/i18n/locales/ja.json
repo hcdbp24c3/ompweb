@@ -1594,6 +1594,7 @@
   "appShell.resizeFilePanel": "ファイルパネルのサイズを変更",
   "appShell.resizeFilePanelTitle": "ドラッグしてファイルパネルの幅を変更します。ダブルクリックまたは Enter で既定の幅に戻ります。",
   "composerContext.title": "コンテキスト",
+  "composerContext.close": "閉じる",
   "composerContext.windowSize": "{tokens} ウィンドウ",
   "composerContext.maxOutput": "最大出力 {tokens}",
   "composerContext.speed": "{current} t/s · 平均 {average}",

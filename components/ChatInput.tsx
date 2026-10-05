@@ -346,6 +346,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const modelSearchInputRef = useRef<HTMLInputElement>(null);
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
   const contextWrapRef = useRef<HTMLDivElement>(null);
+  const contextTriggerRef = useRef<HTMLButtonElement>(null);
   const plusMenuRef = useRef<HTMLDivElement>(null);
   const historyMenuRef = useRef<HTMLDivElement>(null);
   const slashMenuRef = useRef<HTMLDivElement>(null);
@@ -1260,6 +1261,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       : Math.max(0, slashActiveIndex - 1);
   }, [filteredSlashCommands.length, slashActiveIndex]);
 
+  // Dismissing the context popover hands focus back to the ring that opened it:
+  // the close button dies with the popover, which would otherwise drop focus on
+  // <body> and strand keyboard navigation at the top of the document.
+  const closeContextPopover = useCallback(() => {
+    setContextOpen(false);
+    contextTriggerRef.current?.focus();
+  }, []);
+
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
       const nativeEvent = e.nativeEvent;
@@ -1279,6 +1288,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         return;
       }
 
+
+      if (contextOpen && !isComposing && e.key === "Escape") {
+        e.preventDefault();
+        closeContextPopover();
+        return;
+      }
 
       if (historyMenuOpen && !isComposing) {
         if (e.key === "ArrowDown") {
@@ -1422,7 +1437,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
       }
     },
-    [isMobile, isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, startFreshDictation, wordPrediction]
+    [isMobile, isStreaming, onSteer, onFollowUp, onAbort, onMinimize, contextOpen, closeContextPopover, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, startFreshDictation, wordPrediction]
   );
 
 
@@ -1618,6 +1633,21 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
+
+  // Escape also has to work with focus off the textarea: opening the popover
+  // from the ring leaves focus on the ring, where the composer's own onKeyDown
+  // never runs. An Escape the composer already handled arrives here already
+  // defaultPrevented, so it must not close the popover a second time.
+  useEffect(() => {
+    if (!contextOpen) return;
+    const handler = (e: globalThis.KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      e.preventDefault();
+      closeContextPopover();
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [contextOpen, closeContextPopover]);
 
   return (
     <div
@@ -2931,6 +2961,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             {onCompact && (
               <div ref={contextWrapRef} style={{ position: "relative", flexShrink: 0 }}>
                 <button
+                  ref={contextTriggerRef}
                   type="button"
                   onClick={() => setContextOpen((open) => !open)}
                   title={ringTitle}
@@ -3002,11 +3033,30 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   >
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 10 }}>
                       <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>{t("composerContext.title")}</span>
-                      {ringPct !== null && (
-                        <span style={{ fontSize: 11, fontFamily: "var(--font-mono)", fontWeight: 700, color: ringTone, fontVariantNumeric: "tabular-nums" }}>
-                          {formatPercent(ringPct)}
-                        </span>
-                      )}
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                        {ringPct !== null && (
+                          <span style={{ fontSize: 11, fontFamily: "var(--font-mono)", fontWeight: 700, color: ringTone, fontVariantNumeric: "tabular-nums" }}>
+                            {formatPercent(ringPct)}
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={closeContextPopover}
+                          aria-label={t("composerContext.close")}
+                          title={t("composerContext.close")}
+                          style={{
+                            display: "inline-flex", alignItems: "center", justifyContent: "center",
+                            width: 20, height: 20, flexShrink: 0, padding: 0,
+                            background: "none", border: "none", borderRadius: 6,
+                            color: "var(--text-dim)", cursor: "pointer",
+                            transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+                          }}
+                          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.background = "none"; e.currentTarget.style.color = "var(--text-dim)"; }}
+                        >
+                          <X size={13} strokeWidth={2} aria-hidden="true" />
+                        </button>
+                      </div>
                     </div>
                     <ContextDetailPanel
                       sessionStats={sessionStats}
