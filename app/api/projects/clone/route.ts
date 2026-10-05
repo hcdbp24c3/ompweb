@@ -5,6 +5,8 @@ import { NextResponse } from "next/server";
 import { apiErrorResponse } from "@/lib/api-utils";
 import { validateGitRef } from "@/lib/git-branch";
 import { cloneDirectoryName } from "@/lib/git-clone";
+import { AmbiguousGitCredentialError, gitCredentialEnv, resolveCredential } from "@/lib/git-credential-resolve";
+import { loadGitCredentials } from "@/lib/git-credentials";
 import { ProjectPathError, validateProjectPath } from "@/lib/project-registry";
 import { hostChildEnv } from "@/lib/project-command-env";
 
@@ -20,7 +22,9 @@ type CloneFrame =
   | { type: "error"; error: string; code: string };
 
 /** Runs `git clone`, streaming its output. Resolves the exit code, or null if
- *  git could not start. Never prompts: credentials must come from helpers/agents.
+ *  git could not start. Never prompts: credentials must come from helpers/agents
+ *  or from `credentialEnv`, which answers the request git would otherwise ask
+ *  about — so the empty GIT_ASKPASS below stays empty.
  *  On POSIX git leads its own session (no controlling terminal, so ssh fails
  *  fast on host-key or passphrase prompts instead of blocking on /dev/tty) and
  *  cancel signals the whole group: ssh/remote helpers hold the output pipes
@@ -28,14 +32,16 @@ type CloneFrame =
  *  `ref` (already validated) goes before the `--`, which ends option parsing:
  *  after it, `--branch` would be read as the repository URL and `ref` as the
  *  target directory. It never reaches the target name, which comes from the URL. */
-function runGitClone(url: string, target: string, ref: string | null, signal: AbortSignal, onOutput: (text: string) => void): Promise<number | null> {
+function runGitClone(url: string, target: string, ref: string | null, credentialEnv: Record<string, string>, signal: AbortSignal, onOutput: (text: string) => void): Promise<number | null> {
   // Aborted while the target was being created: skip git; the caller cleans up.
   if (signal.aborted) return Promise.resolve(null);
   const { promise, resolve } = Promise.withResolvers<number | null>();
   const child = spawn("git", ["clone", "--progress", ...(ref ? ["--branch", ref] : []), "--", url, target], {
     stdio: ["ignore", "pipe", "pipe"],
     // An empty GIT_ASKPASS also overrides core.askPass/SSH_ASKPASS fallbacks.
-    env: hostChildEnv({ GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS: "", GIT_ALLOW_PROTOCOL: "https:ssh" }),
+    // The credential, when there is one, arrives as GIT_CONFIG_* — environment
+    // only, so it is in neither the argv nor the URL nor the streamed output.
+    env: hostChildEnv({ GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS: "", GIT_ALLOW_PROTOCOL: "https:ssh", ...credentialEnv }),
     detached: process.platform !== "win32",
     windowsHide: true,
   });
@@ -92,6 +98,19 @@ export async function POST(req: Request) {
     if (error instanceof ProjectPathError) return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
     throw error;
   }
+  // Resolved before the target is created: a store that cannot say which
+  // credential this remote wants is refused with a 400 rather than answered by
+  // cloning as whichever record happened to be first. The resolution is url-only
+  // — a clone target does not exist yet, so there is no cwd to resolve.
+  let credentialEnv: Record<string, string>;
+  try {
+    credentialEnv = gitCredentialEnv(await resolveCredential({ url, credentials: loadGitCredentials() }));
+  } catch (error) {
+    if (error instanceof AmbiguousGitCredentialError) {
+      return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
+    }
+    throw error;
+  }
   // Registered before any await so a cancel sent while the target is being
   // created is not a 404; runGitClone then skips git and the stream cleans up.
   const controller = new AbortController();
@@ -119,7 +138,7 @@ export async function POST(req: Request) {
           // Client gone; the clone still finishes its cleanup.
         }
       };
-      const code = await runGitClone(url, target, ref, controller.signal, (text) => send({ type: "output", text }));
+      const code = await runGitClone(url, target, ref, credentialEnv, controller.signal, (text) => send({ type: "output", text }));
       clones.delete(id);
       if (code === 0 && !controller.signal.aborted) {
         send({ type: "done", path: target });

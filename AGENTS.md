@@ -318,12 +318,49 @@ handled or safely ignored.
   clones into `<selected dir>/<repo name>`, then registers that directory
   through the normal `POST /api/projects` path.
 - Only `https://`, `ssh://` and scp-like `user@host:path` URLs are accepted
-  (`cloneDirectoryName`); git also runs with `GIT_ALLOW_PROTOCOL=https:ssh`
-  and `GIT_TERMINAL_PROMPT=0`, so credentials must come from helpers/agents.
+  (`cloneDirectoryName`, and `isSupportedGitUrl` for anything that decides where
+  a token may be sent); git also runs with `GIT_ALLOW_PROTOCOL=https:ssh`,
+  `GIT_TERMINAL_PROMPT=0` and empty `GIT_ASKPASS`/`SSH_ASKPASS`, so a clone
+  fails fast rather than blocking on a prompt. A stored credential answers that
+  prompt through `GIT_CONFIG_*` instead — see "Named git credentials" below.
 - The POST streams NDJSON (`output` chunks, then one of `done` / `cancelled` /
   `error`). Cancel is `DELETE { id }`: the POST stream stays open until the
   partial clone is deleted, so the UI can confirm the cleanup. A client
   disconnect cancels and cleans up too. An existing target is refused (409).
+
+### Named git credentials (`lib/git-credentials.ts`, `lib/git-credential-resolve.ts`)
+- The store holds named PAT/SSH records; `loadGitCredentials()` decrypts and is
+  **server-only**. Which record a remote gets is decided by
+  `resolveCredential({ url, cwd, credentials })`: host+owner (the remote's owner
+  equals the record's `account`) → `isDefaultForHost` → the host's only record →
+  an `AmbiguousGitCredentialError` naming the candidates. **Never array order and
+  never a usage counter** — re-saving a record would change the identity a clone
+  runs as. The clone route turns that error into a 400 *before* `mkdir`, so an
+  undecidable store never leaves a directory behind.
+- Delivery is `GIT_CONFIG_COUNT` + `GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`
+  carrying `http.https://<host>.extraheader` = `AUTHORIZATION: basic
+  base64(user:token)`, merged into `hostChildEnv()` overrides. **Env, never argv
+  and never the remote URL** — a URL token lands in `.git/config`, in `ps`, and
+  in every error message. Exactly **one** header per child: git applies
+  extraheader unconditionally, so two for one host means two `Authorization`
+  headers and the server picks.
+- **No askpass helper exists**, so nothing has to be copied into the image; the
+  empties above stay empty and the credential means git never has to ask. If one
+  is ever added it must be named through `OMP_GIT_ASKPASS*` and never
+  `OMP_WEB_*` — `hostChildEnv()` deletes that whole prefix before the child sees
+  it (the `GIT_CONFIG_*` names survive it, which the tests pin).
+- `cwd` is optional and means "the repository this belongs to":
+  `resolveProject()` maps a linked worktree back to its main root first (a
+  worktree is a *sibling* directory, so keying on the worktree path would never
+  find the repository). `lib/skill-updates.ts` has only a URL — it must never
+  invent a directory.
+- `ssh` records and records whose token cannot be decrypted are **not**
+  candidates: this feature does not teach git to use a private key, and a record
+  that cannot authenticate must not shadow one that can, nor manufacture an
+  ambiguity. Cloning over `ssh://` is therefore unchanged.
+- Some environments (this dev container among them) inject their own
+  `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`; `hostChildEnv()` keeps them. That is why
+  the tests clear the ambient ones before asserting "nothing was added".
 
 ### File access allow-list
 - `/api/files` is intentionally not a general filesystem browser. Allowed roots come from session cwds, their resolved project roots, `~/omp-cwd-*`, and roots explicitly added with `allowFileRoot()`.
