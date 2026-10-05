@@ -3138,6 +3138,7 @@ html[data-touch-targets="accessible"] .message-overflow-toggle {
 }
 
 .mcp-editor-grid > :first-child { min-width: 0; }
+.git-credentials-editor > :first-child { min-width: 0; }
 .empty-chat-brand { }
 .empty-session-intro {
   padding: 26px 8px 22px;
@@ -3173,6 +3174,8 @@ html[data-touch-targets="accessible"] .message-overflow-toggle {
 @media (max-width: 640px) {
   .mcp-editor-grid { grid-template-columns: 1fr !important; }
   .mcp-editor-grid > :first-child { border-right: 0 !important; border-bottom: 1px solid var(--border); }
+  .git-credentials-editor { grid-template-columns: 1fr !important; }
+  .git-credentials-editor > :first-child { border-right: 0 !important; border-bottom: 1px solid var(--border); }
   .empty-chat-brand { margin-left: 0 !important; margin-right: 0 !important; }
   .model-role-row { grid-template-columns: 1fr !important; gap: 6px !important; }
   .model-detail-grid-2 { grid-template-columns: 1fr !important; }
