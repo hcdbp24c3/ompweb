@@ -78,6 +78,7 @@ const world = {
   sessions: new Map(), // sid -> { leafId, messages, entryIds }
   agents: new Map(), // sid -> { running, state }
   subagentSnapshots: new Map(), // sid -> SubagentSnapshotLike[]
+  statsOverrides: new Map(), // sid -> SessionStatsInfo returned by get_session_stats
   streams: new Map(),
   live: new Map(),
   views: new Map(),
@@ -160,6 +161,9 @@ async function fetchStub(url, init = {}) {
       const body = typeof init.body === "string" ? safeParse(init.body) : null;
       if (body?.type === "get_subagents") {
         return jsonResponse(200, { success: true, data: { subagents: world.subagentSnapshots.get(sid) ?? [] } });
+      }
+      if (body?.type === "get_session_stats") {
+        return jsonResponse(200, { success: true, data: sessionStatsFor(sid) });
       }
       return jsonResponse(200, { success: true, data: {} });
     }
@@ -272,6 +276,7 @@ function resetWorld() {
   world.sessions.clear();
   world.agents.clear();
   world.subagentSnapshots.clear();
+  world.statsOverrides.clear();
   world.streams.clear();
   world.live.clear();
   world.views.clear();
@@ -290,6 +295,24 @@ function primeSession(sid, messages) {
 
 function saveSession(sid, messages, entryIds = messages.map((_, i) => `e${i}`)) {
   world.sessions.set(sid, { leafId: entryIds.at(-1) ?? null, messages, entryIds });
+}
+
+/** What omp's `get_session_stats` reports for a session: counts over the FILE. */
+function sessionStatsFor(sid) {
+  const override = world.statsOverrides.get(sid);
+  if (override) return override;
+  const f = world.sessions.get(sid);
+  const messages = f?.messages ?? [];
+  return {
+    sessionId: sid,
+    userMessages: messages.filter((m) => m.role === "user").length,
+    assistantMessages: messages.filter((m) => m.role === "assistant").length,
+    toolCalls: messages.reduce((n, m) => n + (Array.isArray(m.content) ? m.content.filter((b) => b.type === "toolCall").length : 0), 0),
+    toolResults: messages.filter((m) => m.role === "toolResult").length,
+    totalMessages: messages.length,
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    cost: 0,
+  };
 }
 
 function appendEntry(sid, message) {
@@ -1082,7 +1105,9 @@ function syncSnapshot(sid, live = null, cursor = null) {
 function holdNextSync(sid, value) {
   let release;
   world.holds.push({
-    match: (method, url) => method === "GET" && url.startsWith(`/api/sessions/${sid}/context?`) && url.includes("sync=1"),
+    // `tail=1` is an initial read of a view, not catch-up: holding it would stall
+    // the navigation that is meant to be racing this one.
+    match: (method, url) => method === "GET" && url.startsWith(`/api/sessions/${sid}/context?`) && url.includes("sync=1") && !url.includes("tail=1"),
     produce: () => new Promise((resolve) => { release = () => resolve({ value }); }),
   });
   return () => {
@@ -1486,8 +1511,12 @@ test("a late full branch context cannot replace a newer incremental history comm
   world.views.set("s1:branch:false", branch);
   let release;
   world.holds.push({
-    match: (method, url) => method === "GET" && url.includes("/api/sessions/s1/context?") && !url.includes("sync=1"),
-    produce: () => new Promise((resolve) => { release = () => resolve({ value: { context: branch } }); }),
+    // Opening a branch is opening a view: it reads the tail page, so this is the
+    // read that has to be overtaken by the newer catch-up.
+    match: (method, url) => method === "GET" && url.includes("/api/sessions/s1/context?") && url.includes("tail=1"),
+    produce: () => new Promise((resolve) => {
+      release = () => resolve({ value: { ...selectSessionHistory(branch, { firstEntryId: null, lastEntryId: null, direction: "tail" }), sessionId: "s1", leafId: "branch", live: null } });
+    }),
   });
   let navigation;
   await act(async () => {
@@ -1527,13 +1556,20 @@ for (const selected of ["active", "branch", "pre-compaction"]) {
       };
       if (selected === "active") world.sessions.set("s1", saved);
       else world.views.set(`s1:branch:${selected === "pre-compaction"}`, saved);
+      // Opening a view reads the newest page and then drains forward; the active
+      // view is reloaded whole. So the read this races is a tail page for a
+      // branch and the whole session for the active view.
+      const tailOf = (view) => selectSessionHistory(view, { firstEntryId: null, lastEntryId: null, direction: "tail" });
+      const firstPageIds = selected === "active" ? [...saved.entryIds] : tailOf(saved).context.entryIds;
       let releaseFull;
       world.holds.push({
         match: (method, url) => method === "GET" && (selected === "active"
           ? url.startsWith("/api/sessions/s1?")
-          : url.startsWith("/api/sessions/s1/context?") && !url.includes("sync=1")),
+          : url.startsWith("/api/sessions/s1/context?") && url.includes("tail=1")),
         produce: () => new Promise((resolve) => {
-          releaseFull = () => resolve({ value: { sessionId: "s1", tree: [], leafId: saved.leafId, context: saved } });
+          releaseFull = () => resolve({ value: selected === "active"
+            ? { sessionId: "s1", tree: [], leafId: saved.leafId, context: saved }
+            : { ...tailOf(saved), sessionId: "s1", leafId: saved.leafId, live: null } });
         }),
       });
       let releasePage;
@@ -1559,14 +1595,14 @@ for (const selected of ["active", "branch", "pre-compaction"]) {
 
       if (order === "full first") {
         await act(async () => { releaseFull(); await fullLoad; });
-        assert.deepEqual(w.latest.entryIds, saved.entryIds, "the full history is visible while page two is stalled");
+        assert.deepEqual(w.latest.entryIds, firstPageIds, "the newest page is visible while page two is stalled");
       } else if (order === "page two fails") {
         await act(async () => { releasePage(); });
         await settle();
         assert.deepEqual(w.latest.entryIds, previousIds, "a failed later page must leave the complete old view intact");
         await act(async () => { releaseFull(); await fullLoad; });
         await settle();
-        assert.deepEqual(w.latest.entryIds, saved.entryIds);
+        assert.deepEqual(w.latest.entryIds, firstPageIds, "a failed later page leaves the newest page, never a truncated read");
       }
       const newer = { ...saved, messages: [...saved.messages, assistantMsg("new", "arrived during fetch")], entryIds: [...saved.entryIds, "saved-new"], leafId: selected === "active" ? "saved-new" : "branch" };
       if (selected === "active") world.sessions.set("s1", newer);
@@ -1576,13 +1612,21 @@ for (const selected of ["active", "branch", "pre-compaction"]) {
         if (order !== "page two fails") releasePage();
       });
       await settle();
-      assert.deepEqual(w.latest.entryIds, newer.entryIds);
+      // "pages first" lets the catch-up read from the start of the view win, so the
+      // whole path is on screen and the late tail read is discarded. When the tail
+      // read wins first, the window is the newest page plus what appended onto it:
+      // a long branch opens on its newest page and only grows forward, and its
+      // older part is reached by scrolling up, never by a background read.
+      const wholePath = selected === "active" || order === "pages first";
+      const appendedIds = wholePath ? newer.entryIds : newer.entryIds.slice(-(firstPageIds.length + 1));
+      const appendedMessages = newer.messages.slice(wholePath ? 0 : -(firstPageIds.length + 1));
+      assert.deepEqual(w.latest.entryIds, appendedIds);
       if (order === "pages first") {
         await act(async () => { releaseFull(); await fullLoad; });
         await settle();
       }
-      assert.deepEqual(w.latest.entryIds, newer.entryIds, "an older complete response cannot remove a newer confirmed suffix");
-      assert.deepEqual(w.latest.messages, newer.messages, "history remains ordered and duplicate-free");
+      assert.deepEqual(w.latest.entryIds, appendedIds, "an older complete response cannot remove a newer confirmed suffix");
+      assert.deepEqual(w.latest.messages, appendedMessages, "history remains ordered and duplicate-free");
       assert.equal(w.latest.activeLeafId, newer.leafId);
       assert.equal(w.latest.showPreCompactionHistory, selected === "pre-compaction");
     });
@@ -2092,4 +2136,130 @@ test("unmount before replacement open cannot restore stale wrapper registrations
   const before = world.calls.length;
   await act(async () => { lateOpen({}); });
   assert.equal(world.calls.slice(before).some((c) => c.method === "POST"), false);
+});
+
+// ---------------------------------------------------------------------------
+// Tail-first transport paging
+// ---------------------------------------------------------------------------
+
+/** A session too long for one 200-entry page, as the route would serve it. */
+function primePagedSession(sid, count) {
+  const messages = Array.from({ length: count }, (_, i) => assistantMsg(`m${i}`, `saved ${i}`));
+  primeSession(sid, messages);
+  world.sessions.get(sid).pagesOnly = true;
+  return messages;
+}
+
+test("scrolling up pages the transcript backwards without replacing what is loaded", async () => {
+  resetWorld();
+  primePagedSession("s1", 460);
+  const w = await mountSession("s1");
+
+  assert.equal(w.latest.entryIds.length, 200, "the browser opens on one page");
+  assert.equal(w.latest.hasOlderMessages, true, "and knows the server holds more");
+  assert.equal(w.latest.historyTotal, 460);
+
+  await act(async () => { await w.latest.loadOlderMessages(); });
+  assert.equal(w.latest.entryIds.length, 400, "a second page is prepended, not swapped in");
+  assert.equal(w.latest.entryIds[0], "e60", "starting immediately before the window head");
+  assert.equal(w.latest.entryIds.at(-1), "e459", "the newest entry never moves");
+  assert.equal(w.latest.messages.length, 400, "messages and entry ids stay in lockstep");
+  assert.equal(w.latest.hasOlderMessages, true);
+
+  await act(async () => { await w.latest.loadOlderMessages(); });
+  assert.equal(w.latest.entryIds.length, 460, "the whole path is now loaded");
+  assert.equal(w.latest.entryIds[0], "e0");
+  assert.equal(w.latest.hasOlderMessages, false, "and there is nothing older left to ask for");
+
+  const backwards = callsTo("GET", "/api/sessions/s1/context?sync=1")
+    .map((c) => new URL(c.url, "http://localhost").searchParams.get("cursor"))
+    .filter(Boolean)
+    .map(JSON.parse)
+    .filter((cursor) => cursor.direction === "backward");
+  assert.equal(backwards.length, 2);
+  assert.deepEqual(backwards.map((c) => c.anchorEntryId), ["e260", "e60"], "each page anchors on the window's own head");
+});
+
+test("the cursor after a backwards page is the oldest loaded entry, not the server's", async () => {
+  // Without this the next forward drain reads from the whole path's head and the
+  // browser is handed the OLDEST 200 entries instead of the newest.
+  resetWorld();
+  primePagedSession("s1", 460);
+  const w = await mountSession("s1");
+  await act(async () => { await w.latest.loadOlderMessages(); });
+  await act(async () => { publishSessionsChanged(["s1"]); });
+  await settle();
+
+  assert.equal(w.latest.entryIds.length, 400, "a catch-up after a prepend must not fall back to the first page");
+  assert.equal(w.latest.entryIds[0], "e60");
+  assert.equal(w.latest.entryIds.at(-1), "e459");
+});
+
+test("a background reload does not throw away the pages scrolled up through", async () => {
+  resetWorld();
+  primePagedSession("s1", 460);
+  const { w, es } = await startRun("s1", "run a prompt");
+  await act(async () => { await w.latest.loadOlderMessages(); });
+  const loaded = w.latest.entryIds.length;
+  assert.equal(loaded, 400, "the user paged back before the run finished");
+
+  // auto_compaction_end reloads the session file in the background
+  // (showLoading=false, no run fence) — the shape the plan calls out.
+  await act(async () => { es.emit({ type: "auto_compaction_end", result: { summary: "compacted" } }); });
+  await settle();
+
+  assert.equal(w.latest.entryIds.length, 400, "a background reload must not re-seed the window with one page");
+  assert.equal(w.latest.entryIds[0], "e60");
+  assert.equal(w.latest.hasOlderMessages, true);
+});
+
+test("a branch read opens on its own newest page and pages backwards from there", async () => {
+  resetWorld();
+  const messages = primePagedSession("s1", 460);
+  // A historical branch: the selected path is the ancestor chain of its leaf, so
+  // it ends at e300 and starts at e0 — 301 entries the browser must page through.
+  world.views.set("s1:e300:false", { leafId: "e300", messages: messages.slice(0, 301), entryIds: Array.from({ length: 301 }, (_, i) => `e${i}`) });
+  const w = await mountSession("s1");
+  assert.equal(w.latest.entryIds.length, 200);
+
+  await act(async () => { await w.latest.handleNavigate("e300"); });
+  await settle();
+
+  assert.equal(w.latest.activeLeafId, "e300", "the branch is still the selected view");
+  assert.equal(w.latest.entryIds.length, 200, "a branch opens on a page like any other view");
+  assert.equal(w.latest.entryIds.at(-1), "e300", "whose newest entry is the leaf that was navigated to");
+  assert.equal(w.latest.entryIds[0], "e101", "and the page is the newest one, not the oldest");
+  assert.equal(w.latest.hasOlderMessages, true, "so the browser knows to page backwards for the rest");
+
+  await act(async () => { await w.latest.loadOlderMessages(); });
+  assert.equal(w.latest.entryIds.length, 301, "the branch pages backwards from its own window head");
+  assert.equal(w.latest.entryIds[0], "e0");
+  assert.equal(w.latest.entryIds.at(-1), "e300");
+  assert.equal(w.latest.hasOlderMessages, false);
+});
+
+test("a windowed transcript reports the session's counts, not the window's", async () => {
+  resetWorld();
+  primePagedSession("s1", 460);
+  const w = await mountSession("s1");
+
+  assert.equal(w.latest.sessionStats, null, "counts derived from 200 loaded messages are not session counts");
+
+  await act(async () => { await w.latest.loadSessionStats(); });
+  assert.ok(callsTo("POST", "/api/agent/s1").some((c) => c.body?.type === "get_session_stats"), "the panel asks omp, not the window");
+  assert.equal(w.latest.sessionStats.totalMessages, 460);
+  assert.equal(w.latest.sessionStats.assistantMessages, 460);
+
+  // Paging on must not wipe a fetched answer: it describes the whole session.
+  await act(async () => { await w.latest.loadOlderMessages(); });
+  assert.equal(w.latest.sessionStats.totalMessages, 460, "a prepended page is not a reason to discard fetched counts");
+});
+
+test("a whole session still derives its counts without an extra request", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q"), assistantMsg("a0", "answer")]);
+  const w = await mountSession("s1");
+
+  assert.equal(w.latest.sessionStats.totalMessages, 2);
+  assert.equal(callsTo("POST", "/api/agent/").some((c) => c.body?.type === "get_session_stats"), false);
 });

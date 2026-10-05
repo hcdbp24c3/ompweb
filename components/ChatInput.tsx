@@ -126,6 +126,9 @@ interface Props {
   contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null;
   /** Session stats shown in the context ring popover. */
   sessionStats?: SessionStatsInfo | null;
+  /** Fetch the session's real totals when the popover opens. A paged transcript
+   *  cannot derive them, so the panel asks omp instead of counting its window. */
+  onRequestSessionStats?: () => void;
   /** Model capacity shown in the context ring popover. */
   modelCapacity?: { contextWindow?: number; maxTokens?: number } | null;
   /** Generation speed shown in the context ring popover. */
@@ -256,6 +259,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onCompact,
   contextUsage,
   sessionStats,
+  onRequestSessionStats,
   modelCapacity,
   generationSpeed,
   onRemoveQueuedMessage,
@@ -399,6 +403,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }, []);
 
 
+  const openContextPopover = useCallback(() => {
+    setContextOpen(true);
+    onRequestSessionStats?.();
+  }, [onRequestSessionStats]);
+
   useImperativeHandle(ref, () => ({
     focus() {
       textareaRef.current?.focus();
@@ -438,7 +447,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       processFiles(files);
     },
     openContextPanel() {
-      setContextOpen(true);
+      openContextPopover();
     },
   }));
 
@@ -2963,7 +2972,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 <button
                   ref={contextTriggerRef}
                   type="button"
-                  onClick={() => setContextOpen((open) => !open)}
+                  onClick={() => { if (contextOpen) setContextOpen(false); else openContextPopover(); }}
                   title={ringTitle}
                   aria-label={t("composerContext.title")}
                   aria-expanded={contextOpen}
