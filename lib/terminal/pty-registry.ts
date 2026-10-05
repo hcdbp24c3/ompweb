@@ -1,4 +1,5 @@
 import { existsSync } from "fs";
+import { join } from "node:path";
 import { sanitizeProjectCommandEnvironment } from "../project-command-env";
 
 /**
@@ -105,7 +106,28 @@ const SHELL_CANDIDATES = [
   "/usr/bin/sh",
 ];
 
+/**
+ * Windows has none of those paths, and `SHELL` is usually unset there, so the
+ * POSIX list alone fell through to `/bin/sh` — which node-pty cannot spawn on
+ * Windows, so the terminal panel would come up empty on every Windows host.
+ * COMSPEC is the system answer (cmd.exe) and PowerShell is the common one for
+ * a developer host; both are absolute paths, which is what node-pty requires.
+ */
+const WINDOWS_SHELL_CANDIDATES = [
+  "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+  "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+];
+
 function resolveShell(): string {
+  if (process.platform === "win32") {
+    const comspec = process.env.COMSPEC;
+    if (comspec && existsSync(comspec)) return comspec;
+    for (const candidate of WINDOWS_SHELL_CANDIDATES) {
+      if (existsSync(candidate)) return candidate;
+    }
+    // Last resort on Windows: cmd.exe is a system file present on every install.
+    return join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe");
+  }
   const fromEnv = process.env.SHELL;
   if (fromEnv && existsSync(fromEnv)) return fromEnv;
   for (const candidate of SHELL_CANDIDATES) {
