@@ -8,12 +8,22 @@ const SSH_URL = /^ssh:\/\/(?:[^\s/@]+@)?[^\s/]+\/\S+$/;
 const SCP_URL = /^(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9.-]{2,}:(?!:|\/\/)[^\s\\]+$/;
 const DIRECTORY_NAME = /^[A-Za-z0-9._-]+$/;
 
-/** Accepts https, ssh:// and scp-like ssh URLs only (no file://, ext::, or
- *  option-looking input); returns the directory name git would clone into,
- *  or null when the URL is unsupported or yields no safe name. */
+/** The only remote URL shapes this app will ever hand to git: https, ssh:// and
+ *  scp-like ssh. `file://`, `ext::`, option-looking input and Windows paths are
+ *  refused. Exported so credential resolution cannot widen the set of remotes
+ *  omp-web is willing to send a token to — a second, looser URL test here would
+ *  be a way to leak one to a transport the clone route would never use. */
+export function isSupportedGitUrl(url: string): boolean {
+  const trimmed = url.trim();
+  return HTTPS_URL.test(trimmed) || SSH_URL.test(trimmed) || SCP_URL.test(trimmed);
+}
+
+/** Accepts https, ssh:// and scp-like ssh URLs only; returns the directory name
+ *  git would clone into, or null when the URL is unsupported or yields no safe
+ *  name. */
 export function cloneDirectoryName(url: string): string | null {
   const trimmed = url.trim();
-  if (!HTTPS_URL.test(trimmed) && !SSH_URL.test(trimmed) && !SCP_URL.test(trimmed)) return null;
+  if (!isSupportedGitUrl(trimmed)) return null;
   const path = trimmed.replace(/[?#].*$/, "").replace(/\/+$/, "");
   const name = path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf(":")) + 1).replace(/\.git$/, "");
   return DIRECTORY_NAME.test(name) && name !== "." && name !== ".." ? name : null;

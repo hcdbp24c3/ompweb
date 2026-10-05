@@ -7,6 +7,9 @@ import type {
   SkillInstallInfo,
   SkillUpdateResult,
 } from "@/lib/api-types";
+import { gitCredentialEnv, resolveCredential } from "@/lib/git-credential-resolve";
+import { loadGitCredentials } from "@/lib/git-credentials";
+import { hostChildEnv } from "@/lib/project-command-env";
 
 const CHECK_TIMEOUT_MS = 15_000;
 const GIT_CHECK_TIMEOUT_MS = 30_000;
@@ -117,15 +120,31 @@ async function fetchJson(
   return response.json();
 }
 
+/** The fallback for a rate-limited GitHub API: fetch the remote tree with git.
+ *  `install.source` is `owner/repo`, so this is url-only resolution — the lock
+ *  entry has no directory and none may be invented for it. An ambiguous
+ *  credential store surfaces as this skill's error message (the caller already
+ *  turns any throw into a scoped error), never as a silent pick. */
 async function resolveGitTreeHash(install: SkillInstallInfo): Promise<string> {
   const repository = `https://github.com/${install.source}.git`;
   const ref = install.ref || "HEAD";
   const folder = skillFolder(install.skillPath!);
   const gitDir = await mkdtemp(join(tmpdir(), "omp-web-skill-check-"));
+  // The credential arrives as GIT_CONFIG_* in the child's environment: never in
+  // argv, never in the URL, never in the output. hostChildEnv() keeps the host's
+  // own OMP_WEB_ secrets out of these git processes while letting GIT_CONFIG_*
+  // through, which is also why the credential variables cannot be named
+  // OMP_WEB_*. GIT_TERMINAL_PROMPT=0 replaces the empty askpass rather than
+  // removing it, so a fetch that the credential does not cover fails fast.
+  const env = hostChildEnv({
+    GIT_TERMINAL_PROMPT: "0",
+    ...gitCredentialEnv(await resolveCredential({ url: repository, credentials: loadGitCredentials() })),
+  });
 
   try {
     await execFileAsync("git", ["init", "--bare", gitDir], {
       timeout: GIT_CHECK_TIMEOUT_MS,
+      env,
     });
     await execFileAsync("git", [
       `--git-dir=${gitDir}`,
@@ -135,12 +154,12 @@ async function resolveGitTreeHash(install: SkillInstallInfo): Promise<string> {
       "--no-tags",
       repository,
       ref,
-    ], { timeout: GIT_CHECK_TIMEOUT_MS });
+    ], { timeout: GIT_CHECK_TIMEOUT_MS, env });
     const revision = folder ? `FETCH_HEAD:${folder}` : "FETCH_HEAD^{tree}";
     const { stdout } = await execFileAsync(
       "git",
       [`--git-dir=${gitDir}`, "rev-parse", revision],
-      { timeout: GIT_CHECK_TIMEOUT_MS },
+      { timeout: GIT_CHECK_TIMEOUT_MS, env },
     );
     const hash = stdout.trim();
     if (!/^[0-9a-f]{40}$/i.test(hash)) throw new Error("Invalid Git tree hash");

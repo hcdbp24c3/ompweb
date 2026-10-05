@@ -63,6 +63,13 @@ FROM node:22-bookworm-slim AS runtime
 # git: omp shells out to git for worktrees and branch state.
 # ca-certificates + curl: omp's installer, and the HTTPS model endpoints.
 # python3: omp's python execution tool.
+#
+# There is deliberately NO git-credential helper script here. A stored git
+# credential (Settings → Extensions & Tools → Git Credentials) reaches git as
+# `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` carrying
+# `http.<host>.extraheader`, which is environment only — no helper binary, no
+# extra file to bake in, and nothing added to the remote URL. See
+# lib/git-credential-resolve.ts; the store it reads lives under /root/.omp.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
