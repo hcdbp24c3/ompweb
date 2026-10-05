@@ -7,7 +7,7 @@ import type {
   SkillInstallInfo,
   SkillUpdateResult,
 } from "@/lib/api-types";
-import { gitCredentialEnv, resolveCredential } from "@/lib/git-credential-resolve";
+import { prepareGitCredential, resolveCredential } from "@/lib/git-credential-resolve";
 import { loadGitCredentials } from "@/lib/git-credentials";
 import { hostChildEnv } from "@/lib/project-command-env";
 
@@ -136,10 +136,12 @@ async function resolveGitTreeHash(install: SkillInstallInfo): Promise<string> {
   // through, which is also why the credential variables cannot be named
   // OMP_WEB_*. GIT_TERMINAL_PROMPT=0 replaces the empty askpass rather than
   // removing it, so a fetch that the credential does not cover fails fast.
-  const env = hostChildEnv({
-    GIT_TERMINAL_PROMPT: "0",
-    ...gitCredentialEnv(await resolveCredential({ url: repository, credentials: loadGitCredentials() })),
-  });
+  // prepareGitCredential() is the one entry point for both transports; the URL
+  // above is https by construction, so it resolves a PAT and stages nothing —
+  // dispose() is called anyway rather than conditionally, so a future https→ssh
+  // change cannot leak a temp key through a forgotten branch.
+  const prepared = prepareGitCredential(await resolveCredential({ url: repository, credentials: loadGitCredentials() }));
+  const env = hostChildEnv({ GIT_TERMINAL_PROMPT: "0", ...prepared.env });
 
   try {
     await execFileAsync("git", ["init", "--bare", gitDir], {
@@ -166,6 +168,7 @@ async function resolveGitTreeHash(install: SkillInstallInfo): Promise<string> {
     return hash;
   } finally {
     await rm(gitDir, { recursive: true, force: true });
+    prepared.dispose();
   }
 }
 

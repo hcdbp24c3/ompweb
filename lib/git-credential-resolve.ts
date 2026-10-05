@@ -4,6 +4,8 @@ import type { GitCredential } from "./git-credentials";
 import { parseGithubRemoteUrl } from "./github-repo";
 import { isSupportedGitUrl } from "./git-clone";
 import { hostChildEnv } from "./project-command-env";
+import { ensureKnownHostsFile } from "./ssh-known-hosts";
+import { buildGitSshCommand, materializeSshKey } from "./ssh-key-material";
 import { resolveProject } from "./worktree";
 
 const execFileAsync = promisify(execFile);
@@ -51,12 +53,23 @@ const execFileAsync = promisify(execFile);
 // it, so a credential carried in an OMP_WEB_ variable would be removed on the
 // way to git. GIT_CONFIG_* survives it, which the tests pin.
 //
-// WHAT IS DELIVERED: one HTTP `Authorization: basic <user:token>` header per
-// child, built from a PAT. An `ssh` record has no token, and this feature
-// deliberately does not teach git to use a private key, so ssh records are not
-// candidates at all — an ssh record marked default must not shadow a PAT that
-// could actually authenticate an https remote. Cloning over ssh:// therefore
-// behaves exactly as it did before: no credential from this store is applied.
+// WHAT IS DELIVERED, and how it depends on the transport.
+//
+// A remote is served by a credential that can actually authenticate it, so
+// candidacy is transport-aware: an `ssh` record for an https:// remote, or a PAT
+// for an ssh:// one, is not a weaker candidate — it is not a candidate at all.
+// The order below is otherwise unchanged.
+//
+//   - https:// → one `http.<url>.extraheader` pair in GIT_CONFIG_*.
+//   - ssh://   → one `GIT_SSH_COMMAND` naming a throwaway private key and the
+//                shared known_hosts. The key is staged by
+//                lib/ssh-key-material.ts and the path by
+//                lib/ssh-known-hosts.ts; this module only decides to call them,
+//                so there is exactly one place where a secret reaches a child.
+//
+// Records whose secret cannot be decrypted (task 08's degraded read:
+// `hasToken: true`, `token: undefined`) are not candidates and never manufacture
+// an ambiguity — a record that cannot authenticate must not shadow one that can.
 //
 // `cwd` is optional and means "the repository this operation belongs to". The
 // remote comes from `url` when there is one, so a caller that has a URL never
@@ -78,11 +91,15 @@ const execFileAsync = promisify(execFile);
 // lib/skill-updates.ts is url-only. It fetches
 // `https://github.com/<owner>/<repo>.git` from skill metadata and has no cwd
 // at all, so it must pass a url; it must never invent a directory to satisfy
-// this signature.
+// this signature. Being https by construction also means its prepare() never
+// stages anything — but it still uses the same entry point, so an ssh remote
+// could not be silently served an http header if that ever changed.
 //
 // Server-side only: it takes DECRYPTED credentials (`loadGitCredentials()`), so
 // nothing resolved here may ever be returned to the browser.
 // ============================================================================
+
+export type RemoteTransport = "https" | "ssh";
 
 export interface ParsedRemote {
   /** `host` or `host:port`, lowercased — never a scheme, userinfo or path. */
@@ -92,6 +109,8 @@ export interface ParsedRemote {
   /** Second path segment, `.git` stripped. Carried for diagnostics; selection
    *  never reads it. */
   repo: string | null;
+  /** Which credential type could possibly authenticate this remote. */
+  transport: RemoteTransport;
 }
 
 /** Why this credential won, so a caller can explain the choice. */
@@ -102,6 +121,7 @@ export interface ResolvedGitCredential {
   /** The remote's host, as it appears in the git config key. */
   host: string;
   owner: string | null;
+  transport: RemoteTransport;
   via: CredentialMatch;
 }
 
@@ -133,6 +153,7 @@ export function parseRemote(url: string): ParsedRemote | null {
 
   let host: string | null;
   let path: string;
+  let transport: RemoteTransport;
   if (trimmed.includes("://")) {
     let parsed: URL;
     try {
@@ -140,9 +161,16 @@ export function parseRemote(url: string): ParsedRemote | null {
     } catch {
       return null;
     }
+    // isSupportedGitUrl admitted only these two schemes, so this is exhaustive —
+    // but it is written as a refusal rather than an `else` on purpose: a third
+    // scheme must never reach selection as "https" by default.
+    if (parsed.protocol === "ssh:") transport = "ssh";
+    else if (parsed.protocol === "https:") transport = "https";
+    else return null;
     host = urlHost(parsed);
     path = parsed.pathname;
   } else {
+    transport = "ssh";
     const separator = trimmed.indexOf(":");
     const authority = SCP_AUTHORITY.exec(trimmed.slice(0, separator));
     host = authority ? authority[1].toLowerCase() : null;
@@ -158,7 +186,7 @@ export function parseRemote(url: string): ParsedRemote | null {
     const slug = parseGithubRemoteUrl(trimmed);
     if (slug) {
       const [owner, repo] = slug.split("/");
-      return { host, owner, repo };
+      return { host, owner, repo, transport };
     }
   }
 
@@ -167,7 +195,7 @@ export function parseRemote(url: string): ParsedRemote | null {
   // `.git` can be the only segment (`https://host/.git`), which leaves nothing:
   // an owner-less remote must read as null, not as an empty account name.
   const cleaned = segments.map((segment, index) => (index === last ? segment.replace(/\.git$/i, "") : segment)).filter(Boolean);
-  return { host, owner: cleaned[0] ?? null, repo: cleaned[1] ?? null };
+  return { host, owner: cleaned[0] ?? null, repo: cleaned[1] ?? null, transport };
 }
 
 /** gh's default-remote priority, so the remote picked here is the one a `gh`
@@ -220,22 +248,35 @@ export async function remoteForCwd(cwd: string): Promise<ParsedRemote | null> {
   }
 }
 
-/** A record this feature can actually deliver: a PAT whose token decrypted. A
- *  record whose key file is missing keeps `hasToken: true` and no token, and
- *  must not be selected — nor make another record ambiguous. */
-function isDeliverable(credential: GitCredential): boolean {
-  return credential.type === "pat" && typeof credential.token === "string" && credential.token.length > 0;
+/** A record this feature can actually deliver for THIS remote: the type the
+ *  transport needs, with a secret that decrypted. A record whose key file is
+ *  missing keeps `hasToken`/`hasPrivateKey` true and no secret, and must not be
+ *  selected — nor make another record ambiguous. */
+function isDeliverable(credential: GitCredential, transport: RemoteTransport): boolean {
+  // `pat` is the store's name for an https remote; `ssh` is the same word for
+  // both the transport and the record type. The two decisions are written
+  // separately on purpose: one says "can this type authenticate this transport",
+  // the other says "which of its secrets is the one that does".
+  if (credential.type !== (transport === "https" ? "pat" : "ssh")) return false;
+  const secret = credential.type === "pat" ? credential.token : credential.privateKey;
+  return typeof secret === "string" && secret.length > 0;
 }
 
 /** The resolution order, as a pure function of a remote and the store. Throws
- *  AmbiguousGitCredentialError rather than guessing. */
+ * AmbiguousGitCredentialError rather than guessing. */
 function selectCredentialForRemote(input: { remote: ParsedRemote; credentials: GitCredential[] }): ResolvedGitCredential | null {
   const { remote, credentials } = input;
   const owner = remote.owner?.toLowerCase() ?? null;
-  const forHost = credentials.filter((credential) => credential.host.toLowerCase() === remote.host && isDeliverable(credential));
+  const forHost = credentials.filter((credential) => credential.host.toLowerCase() === remote.host && isDeliverable(credential, remote.transport));
   if (forHost.length === 0) return null;
 
-  const chosen = (credential: GitCredential, via: CredentialMatch): ResolvedGitCredential => ({ credential, host: remote.host, owner: remote.owner, via });
+  const chosen = (credential: GitCredential, via: CredentialMatch): ResolvedGitCredential => ({
+    credential,
+    host: remote.host,
+    owner: remote.owner,
+    transport: remote.transport,
+    via,
+  });
   const byOwner = owner ? forHost.filter((credential) => credential.account.toLowerCase() === owner) : [];
   // An owner that matches more than one record is not a decision, so it falls
   // through to the rules below rather than picking one of them.
@@ -265,16 +306,67 @@ function gitAuthUsername(host: string): string {
   return hostname === "github.com" ? "x-access-token" : "oauth2";
 }
 
-/** The environment for one git child: exactly one `http.<url>.extraheader`
- *  entry, or nothing at all. Merge it into hostChildEnv() overrides — never
- *  into argv, and never into the URL. */
-export function gitCredentialEnv(resolved: ResolvedGitCredential | null | undefined): Record<string, string> {
-  const token = resolved?.credential.token;
-  if (!resolved || !token) return {};
+/** What `prepareGitCredential` hands back: overrides for hostChildEnv(), plus the
+ *  removal of anything it had to write to disk. */
+export interface PreparedGitCredential {
+  env: Record<string, string>;
+  /** Idempotent, and safe to call long after the child exited — including when
+   *  it exited because the operation was aborted. */
+  dispose(): void;
+}
+
+const NOTHING_PREPARED: PreparedGitCredential = { env: {}, dispose() {} };
+
+/** The environment for one git child — exactly one credential, delivered in the
+ *  form that child understands, or nothing at all.
+ *
+ *  Merge `env` into hostChildEnv() overrides: never into argv, and never into
+ *  the URL. For an ssh credential this also STAGES the private key on disk, which
+ *  is why the result is disposable rather than a plain object — and why
+ *  `options.signal` makes the removal abort-safe: the clone route cancels through
+ *  an AbortController and kills the whole process group, so the child's `close`
+ *  can arrive long after a `finally` around it has run, or never arrive.
+ *
+* Throws rather than degrading when a secret exists but cannot be staged (an
+ * unwritable tmpdir, a key that is not a private key): quietly handing git an
+ * empty environment would turn a setup problem into an unauthenticated clone.
+ *
+ * An already-aborted `signal` still returns a usable `env` whose key path is
+ * already gone. That is deliberate: the caller has its own abort guard and must
+ * not spawn anything, so there is nothing to protect here, and returning an empty
+ * env would hide the fact that a credential *was* resolved.
+ */
+export function prepareGitCredential(
+  resolved: ResolvedGitCredential | null | undefined,
+  options: { signal?: AbortSignal } = {},
+): PreparedGitCredential {
+  const credential = resolved?.credential;
+  if (!resolved || !credential) return NOTHING_PREPARED;
+
+  if (credential.type === "ssh") {
+    const key = credential.privateKey;
+    if (typeof key !== "string" || !key) return NOTHING_PREPARED;
+    // The order matters: the key is staged first, so a failure to create
+    // known_hosts cannot leave a private key behind for want of a dispose.
+    const material = materializeSshKey(key, { signal: options.signal });
+    try {
+      const knownHosts = ensureKnownHostsFile();
+      return { env: { GIT_SSH_COMMAND: buildGitSshCommand({ keyPath: material.keyPath, knownHosts }) }, dispose: material.dispose };
+    } catch (error) {
+      material.dispose();
+      throw error;
+    }
+  }
+
+  const token = credential.token;
+  if (typeof token !== "string" || !token) return NOTHING_PREPARED;
   const basic = Buffer.from(`${gitAuthUsername(resolved.host)}:${token}`, "utf8").toString("base64");
   return {
-    GIT_CONFIG_COUNT: "1",
-    GIT_CONFIG_KEY_0: `http.https://${resolved.host}/.extraheader`,
-    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${basic}`,
+    env: {
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: `http.https://${resolved.host}/.extraheader`,
+      GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${basic}`,
+    },
+    dispose() {},
   };
 }
