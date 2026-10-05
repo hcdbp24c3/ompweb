@@ -23,12 +23,13 @@ const ModelsConfig = dynamic(() => import("./ModelsConfig").then((module) => mod
 const SkillsConfig = dynamic(() => import("./SkillsConfig").then((module) => module.SkillsConfig), { loading: SettingsTabLoading, ssr: false });
 const PluginsConfig = dynamic(() => import("./PluginsConfig").then((module) => module.PluginsConfig), { loading: SettingsTabLoading, ssr: false });
 const McpConfig = dynamic(() => import("./McpConfig").then((module) => module.McpConfig), { loading: SettingsTabLoading, ssr: false });
+const GitCredentialsConfig = dynamic(() => import("./GitCredentialsConfig").then((module) => module.GitCredentialsConfig), { loading: SettingsTabLoading, ssr: false });
 const AgentsConfig = dynamic(() => import("./AgentsConfig").then((module) => module.AgentsConfig), { loading: SettingsTabLoading, ssr: false });
 const UsageConfig = dynamic(() => import("./UsageConfig").then((module) => module.UsageConfig), { loading: SettingsTabLoading, ssr: false });
 
 type UpdateState = AppUpdateInfo;
 /** Sub-panels of the "Extensions & Tools" tab. */
-type ExtensionsSubTab = "mcp" | "skills" | "plugins";
+type ExtensionsSubTab = "mcp" | "skills" | "plugins" | "git";
 type WindowsServiceStatus = {
   isWindows: boolean;
   isInstalled: boolean;
@@ -1294,7 +1295,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.extensionsToolsDesc")}</p>
                 </div>
                 <div className="providers-segmented" style={{ marginBottom: 0 }} role="group" aria-label={t("settingsConfig.extensionsTools")}>
-                  {(["mcp", "skills", "plugins"] as const).map((value) => (
+                  {(["mcp", "skills", "plugins", "git"] as const).map((value) => (
                     <button
                       key={value}
                       type="button"
@@ -1345,6 +1346,12 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   ) : (
                     <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>{t("settingsConfig.selectWorkspaceForMcp")}</p>
                   )
+                )}
+                {extensionsTab === "git" && (
+                  // Named git credentials are global (they are keyed by host
+                  // and account, not by workspace), so this panel is the one
+                  // Extensions sub-tab that does not require a cwd.
+                  <GitCredentialsConfig />
                 )}
               </div>
             )}
