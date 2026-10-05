@@ -1617,5 +1617,8 @@
   "sessionSidebar.explorerChanged": "{count} 个改动的文件",
   "sessionSidebar.explorerClean": "Git 工作区干净",
   "modelsConfig.resolvedModelsCaption": "由 omp 解析得到 — 未保存到 models.yml",
-  "modelsConfig.noModelsResolved": "未解析到模型。请点击上方的 \"Add Model\" 或 \"Catalog\" 进行配置。"
+  "modelsConfig.noModelsResolved": "未解析到模型。请点击上方的 \"Add Model\" 或 \"Catalog\" 进行配置。",
+  "modelsConfig.discoveryFilterPlaceholder": "按名称或 ID 筛选…",
+  "modelsConfig.discoveryShowingOf": "显示 {shown} / {total}",
+  "modelsConfig.discoveryShowMore": "显示其余 {count} 个"
 }
