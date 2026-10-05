@@ -1617,5 +1617,8 @@
   "sessionSidebar.explorerChanged": "変更 {count} ファイル",
   "sessionSidebar.explorerClean": "Git ワーキングツリーに変更なし",
   "modelsConfig.resolvedModelsCaption": "omp が解決したモデル（models.yml には保存されていません）",
-  "modelsConfig.noModelsResolved": "モデルが解決されていません。上の「Add Model」または「Catalog」で設定してください。"
+  "modelsConfig.noModelsResolved": "モデルが解決されていません。上の「Add Model」または「Catalog」で設定してください。",
+  "modelsConfig.discoveryFilterPlaceholder": "名前または ID で絞り込み…",
+  "modelsConfig.discoveryShowingOf": "{total} 件中 {shown} 件を表示",
+  "modelsConfig.discoveryShowMore": "他{count}件を表示"
 }

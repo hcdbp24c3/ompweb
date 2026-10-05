@@ -99,6 +99,20 @@ type DiscoverState =
       baseUrl?: string;
     };
 
+/** Rows of a discovery result rendered before the show-more control. A large
+ *  aggregator answers `/models` with hundreds of entries, and rendering every
+ *  one grew the settings pane by the full result height with no way to find a
+ *  single model in it. Purely presentational: `selected` still covers the whole
+ *  result, so a row the cap hides is still appended by "Add selected". */
+const DISCOVERY_RESULT_LIMIT = 30;
+
+/** Does a discovery row match the filter box? Both fields, case-insensitively:
+ *  a display name is not an identifier, and an aggregator ids a model with no
+ *  name at all, so a name-only filter would hide most of a real result set. */
+function matchesDiscoveryFilter(model: DiscoveredModel, needle: string): boolean {
+  return model.id.toLowerCase().includes(needle) || (model.name?.toLowerCase().includes(needle) ?? false);
+}
+
 /** Provider-level model discovery (omp's `discovery` block) plus the Discover
  *  button that resolves the list through `/api/models-config/discover`.
  *
@@ -113,6 +127,11 @@ function ProviderDiscoveryEditor({ name, provider, onChange, onAddModels }: {
   const { t, tn } = useI18n();
   const [discover, setDiscover] = useState<DiscoverState>({ phase: "idle" });
   const [timeoutDraft, setTimeoutDraft] = useState<string | null>(null);
+  /** The discovery list's own view state. Both reset with `discover` itself: a
+   *  filter narrowed one result set, and an expansion of another, are not
+   *  answers to a new question. */
+  const [discoverFilter, setDiscoverFilter] = useState("");
+  const [discoverShown, setDiscoverShown] = useState(DISCOVERY_RESULT_LIMIT);
   const discovery = provider.discovery;
   const type = discovery?.type;
   // omp defaults injectV1 to true, so an unset block shows an enabled box and
@@ -127,6 +146,8 @@ function ProviderDiscoveryEditor({ name, provider, onChange, onAddModels }: {
   // connectivity test.
   useEffect(() => {
     setDiscover({ phase: "idle" });
+    setDiscoverFilter("");
+    setDiscoverShown(DISCOVERY_RESULT_LIMIT);
   }, [name, provider.baseUrl, provider.api, provider.apiKey]);
 
   /** Single place the `discovery` block is built, and therefore the single
@@ -197,6 +218,8 @@ function ProviderDiscoveryEditor({ name, provider, onChange, onAddModels }: {
         return;
       }
       const models = Array.isArray(d.models) ? d.models : [];
+      setDiscoverFilter("");
+      setDiscoverShown(DISCOVERY_RESULT_LIMIT);
       setDiscover({
         phase: "found",
         models,
@@ -226,6 +249,13 @@ function ProviderDiscoveryEditor({ name, provider, onChange, onAddModels }: {
     onAddModels(picked.map(discoveredToModelEntry));
     setDiscover({ phase: "idle" });
   };
+
+  const discoveryNeedle = discoverFilter.trim().toLowerCase();
+  const discoveryMatches = discover.phase === "found"
+    ? (discoveryNeedle ? discover.models.filter((model) => matchesDiscoveryFilter(model, discoveryNeedle)) : discover.models)
+    : [];
+  const discoveryVisible = discoveryMatches.slice(0, discoverShown);
+  const discoveryHidden = discoveryMatches.length - discoveryVisible.length;
 
   return (
     <FieldGroup
@@ -353,24 +383,75 @@ function ProviderDiscoveryEditor({ name, provider, onChange, onAddModels }: {
               <span style={{ fontSize: 10, color: "var(--text-dim)" }}>
                 {tn("modelsConfig.modelsFound", discover.models.length)}
               </span>
-              {discover.models.map((model) => (
-                <label
-                  key={model.id}
-                  style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--text)", cursor: "pointer" }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={discover.selected.has(model.id)}
-                    onChange={() => toggle(model.id)}
-                    aria-label={model.id}
-                    style={{ width: 14, height: 14, accentColor: "var(--accent)", flexShrink: 0 }}
-                  />
-                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{modelLabel(model.name, model.id)}</span>
-                  {modelIdSuffix(model.name, model.id) && (
-                    <code style={{ color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)", marginLeft: "auto" }}>{model.id}</code>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", cursor: "text" }}>
+                <Search size={14} aria-hidden="true" style={{ color: "var(--text-dim)", flexShrink: 0 }} />
+                <input
+                  value={discoverFilter}
+                  onChange={(e) => {
+                    setDiscoverFilter(e.target.value);
+                    setDiscoverShown(DISCOVERY_RESULT_LIMIT);
+                  }}
+                  aria-label={t("modelsConfig.discoveryFilterPlaceholder")}
+                  placeholder={t("modelsConfig.discoveryFilterPlaceholder")}
+                  style={{ flex: 1, minWidth: 0, background: "none", border: "none", outline: "none", color: "var(--text)", fontSize: 12 }}
+                />
+                {discoverFilter && (
+                  <button type="button" onClick={() => { setDiscoverFilter(""); setDiscoverShown(DISCOVERY_RESULT_LIMIT); }} style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", fontSize: 16, lineHeight: 1, padding: "0 2px" }} aria-label={t("modelsConfig.clearFilter")}>×</button>
+                )}
+              </label>
+              {discoveryMatches.length === 0 ? (
+                <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+                  {t("modelsConfig.noModelsMatch", { query: discoverFilter.trim() })}
+                </span>
+              ) : (
+                <>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 260, overflowY: "auto" }}>
+                    {discoveryVisible.map((model) => (
+                      <label
+                        key={model.id}
+                        style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--text)", cursor: "pointer" }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={discover.selected.has(model.id)}
+                          onChange={() => toggle(model.id)}
+                          aria-label={model.id}
+                          style={{ width: 14, height: 14, accentColor: "var(--accent)", flexShrink: 0 }}
+                        />
+                        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{modelLabel(model.name, model.id)}</span>
+                        {modelIdSuffix(model.name, model.id) && (
+                          <code style={{ color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)", marginLeft: "auto" }}>{model.id}</code>
+                        )}
+                      </label>
+                    ))}
+                  </div>
+                  {(discoveryHidden > 0 || discoveryMatches.length !== discover.models.length) && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 10, color: "var(--text-dim)" }}>
+                        {t("modelsConfig.discoveryShowingOf", { shown: discoveryVisible.length, total: discoveryMatches.length })}
+                      </span>
+                      {discoveryHidden > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setDiscoverShown((n) => n + DISCOVERY_RESULT_LIMIT)}
+                          aria-label={t("modelsConfig.discoveryShowMore", { count: discoveryHidden })}
+                          style={{
+                            padding: "3px 9px",
+                            background: "none",
+                            border: "1px solid var(--border)",
+                            borderRadius: "var(--radius-control)",
+                            color: "var(--text-muted)",
+                            cursor: "pointer",
+                            fontSize: 10,
+                          }}
+                        >
+                          {t("modelsConfig.discoveryShowMore", { count: discoveryHidden })}
+                        </button>
+                      )}
+                    </div>
                   )}
-                </label>
-              ))}
+                </>
+              )}
             </div>
           )
         )}
