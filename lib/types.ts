@@ -287,8 +287,14 @@ export interface SessionMessageEntry extends SessionEntryBase {
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
   type: "thinking_level_change";
+  /** Resolved level for the run ("off", an effort, ...); absent on old entries. */
   thinkingLevel?: string | null;
-  /** Configured selector ("auto" or a concrete level); absent on old entries. */
+  /**
+   * The selector that produced `thinkingLevel`, written by omp alongside it.
+   * "inherit" is the composer's Auto; a concrete level repeats the resolved
+   * value. Absent on entries written before the field existed, and null never
+   * means Auto — prefer it only when present.
+   */
   configured?: string | null;
 }
 

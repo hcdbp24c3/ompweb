@@ -606,7 +606,10 @@ function historyEntryMetadata(entry: SessionEntry): SessionEntry {
   } else if (entry.type === "model_change") {
     Object.assign(compact, { model: entry.model, role: entry.role, provider: entry.provider, modelId: entry.modelId });
   } else if (entry.type === "thinking_level_change") {
+    // Both fields are needed: the index keeps only selection inputs, so
+    // dropping `configured` here would make every paged reload lose Auto.
     compact.thinkingLevel = entry.thinkingLevel;
+    compact.configured = entry.configured;
   } else if (entry.type === "compaction") {
     compact.firstKeptEntryId = entry.firstKeptEntryId;
     compact.firstKeptEntryIndex = (entry as unknown as Record<string, unknown>).firstKeptEntryIndex;
@@ -865,7 +868,11 @@ function selectSessionContext(
   let compaction: CompactionEntry | null = null;
   for (const entry of path) {
     if (entry.type === "thinking_level_change") {
-      thinkingLevel = entry.thinkingLevel ?? "off";
+      // omp appends the resolved level AND the configured selector. Prefer the
+      // selector so a persisted Auto ("inherit") does not rehydrate as the
+      // concrete effort it resolved to; `configured` is absent on entries
+      // written before the field existed, and `null` never means Auto.
+      thinkingLevel = entry.configured ?? entry.thinkingLevel ?? "off";
     } else if (entry.type === "model_change") {
       if (entry.model) {
         const role = entry.role ?? "default";

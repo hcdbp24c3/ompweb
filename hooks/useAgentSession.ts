@@ -687,7 +687,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // idle-disposed session restarts omp, which re-resolves the model from the
   // session file — the freshly resolved model (and clamped thinking level)
   // must reach the composer so the ladder/active level match reality.
-  const refreshLiveModelState = useCallback(async (sid: string) => {
+  const refreshLiveModelState = useCallback(async (sid: string, options?: { thinkingLevelInFlight?: boolean }) => {
     const token = beginAuthoritativeModelSync();
     try {
       const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
@@ -696,7 +696,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (sessionIdRef.current !== sid) return;
       const applied = applyAuthoritativeModel(toThinkingModelMeta(agentState.state?.model), token);
       if (!applied) return; // stale snapshot — drop its thinking level too
-      if (agentState.state?.thinkingLevel !== undefined) {
+      // get_state reports the RESOLVED level, so a refresh fired right after a
+      // thinking-level command would undo it — for Auto it would pin the
+      // concrete effort it resolved to. That fence must stay narrower than
+      // modelCommandPendingRef: a model switch legitimately re-resolves the
+      // level, and its resolved level has to reach the composer.
+      if (agentState.state?.thinkingLevel !== undefined && !options?.thinkingLevelInFlight) {
         setThinkingLevel(normalizeThinkingLevel(agentState.state.thinkingLevel));
       }
       // Fast mode is family-scoped in omp: switching to a fast-supported
@@ -1929,10 +1934,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         break;
       }
-      case "thinking_level_changed":
+      case "thinking_level_changed": {
         authoritativeModelSeqRef.current += 1;
-        setThinkingLevel(normalizeThinkingLevel(event.thinkingLevel as string | undefined));
+        // omp's auto branch emits `configured: "inherit"` beside the resolved
+        // level; its explicit-level branch omits `configured` altogether. So
+        // `configured` is the selector when present and `thinkingLevel` is the
+        // answer otherwise — never invert that, and never read a missing field
+        // as Auto. (config_update carries no `configured` — only the resolved
+        // level — so it keeps reading thinkingLevel.)
+        const level = (event.configured ?? event.thinkingLevel) as string | undefined;
+        // A frame carrying neither field carries no answer at all, and
+        // normalizeThinkingLevel reads a missing value as Auto — which would
+        // turn "no information" into "the user picked Auto".
+        if (level !== undefined) setThinkingLevel(normalizeThinkingLevel(level));
         break;
+      }
       case "model_changed": {
         // Bare event: omp switched the resolved model (explicit /model,
         // retry-fallback, prewalk hand-off). No payload — sync from state.
@@ -2831,7 +2847,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     modelCommandPendingRef.current += 1;
     try {
       await sendAgentCommand(sid, { type: "cycle_thinking_level" });
-      await refreshLiveModelState(sid);
+      // omp's cycle includes the Auto sentinel, and echoes it as
+      // thinking_level_changed{configured:"inherit"}; that event — not the
+      // resolved level this refresh would read back — is the answer.
+      await refreshLiveModelState(sid, { thinkingLevelInFlight: true });
     } catch (error) {
       console.error("Failed to cycle thinking level:", error);
       addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
@@ -3128,13 +3147,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     authoritativeModelSeqRef.current += 1;
     setThinkingLevel(level);
-    if (level === "auto") return; // "auto" leaves pi's current setting untouched
+    // "auto" is a real choice, not the absence of one: omp's ThinkingLevel
+    // carries Inherit ("inherit") as its first member, and set_thinking_level
+    // with it flips the child into auto-thinking. Sending nothing left the
+    // previous concrete level standing and made the next sync overwrite the
+    // selection. Everything downstream (get_state, config_update, the
+    // thinking_level_change entry) reports the RESOLVED level, so the sync
+    // guard in refreshLiveModelState is what keeps this choice readable.
     modelCommandPendingRef.current += 1;
     try {
       const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
       if (!sid) return;
-      await sendAgentCommand(sid, { type: "set_thinking_level", level });
-      await refreshLiveModelState(sid);
+      await sendAgentCommand(sid, { type: "set_thinking_level", level: level === "auto" ? "inherit" : level });
+      await refreshLiveModelState(sid, { thinkingLevelInFlight: true });
     } catch (e) {
       console.error("Failed to set thinking level:", e);
     } finally {
