@@ -948,7 +948,10 @@ const SessionItem = memo(function SessionItem({
     if (copyingTranscript) return;
     setCopyingTranscript(true);
     try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`);
+      // `context=1` is required, not an optimisation: the route omits a transcript
+      // longer than one history page, and a copy carrying only the newest 200
+      // entries would be worse than no copy at all.
+      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}?context=1`);
       if (!response.ok) throw new Error("Session transcript fetch failed");
       const data = await response.json() as { context?: { messages?: AgentMessage[] }; info?: { cwd?: string } };
       const markdown = transcriptToMarkdown(data.context?.messages ?? [], { title, cwd: data.info?.cwd ?? session.cwd });

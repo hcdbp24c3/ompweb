@@ -37,7 +37,7 @@ export async function GET(
     if (boundary !== "1" || url.searchParams.getAll("boundary").length !== 1) {
       return NextResponse.json({ error: "Invalid boundary mode", code: "invalid_boundary" }, { status: 400 });
     }
-    if (["sync", "leafId", "includePreCompaction", "cursor", "limit"].some((option) => url.searchParams.has(option))) {
+    if (["sync", "leafId", "includePreCompaction", "cursor", "limit", "tail"].some((option) => url.searchParams.has(option))) {
       return NextResponse.json({ error: "Boundary mode requires the current active context", code: "invalid_boundary_options" }, { status: 400 });
     }
   }
@@ -59,6 +59,14 @@ export async function GET(
         return NextResponse.json({ error: "Invalid history page limit", code: "invalid_sync_limit" }, { status: 400 });
       }
     }
+    const tail = url.searchParams.get("tail");
+    if (tail !== null && tail !== "1") {
+      return NextResponse.json({ error: "Invalid tail mode", code: "invalid_sync_tail" }, { status: 400 });
+    }
+    // A cursor names a real position and always wins; `tail` only means
+    // something on the very first read, where there is nothing to walk forward
+    // from and the newest page is the one the browser opens on.
+    if (cursor === null && tail === "1") cursor = { firstEntryId: null, lastEntryId: null, direction: "tail" };
   }
 
   try {

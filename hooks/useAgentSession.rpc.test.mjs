@@ -118,8 +118,12 @@ async function fetchStub(url, init = {}) {
     if (params.get("boundary") === "1") return jsonResponse(200, { entryIds: [...f.entryIds] });
     const context = { todoPhases: [], thinkingLevel: "off", model: null, ...f };
     if (!params.has("sync")) return jsonResponse(200, { context });
+    // ?tail=1 asks for the newest page — the shape of a first read with no cursor.
+    const cursor = params.has("cursor")
+      ? JSON.parse(params.get("cursor"))
+      : (params.get("tail") === "1" ? { firstEntryId: null, lastEntryId: null, direction: "tail" } : null);
     return jsonResponse(200, {
-      ...selectSessionHistory(context, params.has("cursor") ? JSON.parse(params.get("cursor")) : null),
+      ...selectSessionHistory(context, cursor),
       sessionId: sid,
       leafId: params.get("leafId") ?? f.leafId,
       live: params.has("leafId") ? null : structuredClone(world.wrappers.get(sid)?.getStreamSnapshot() ?? world.live.get(sid) ?? null),
@@ -129,10 +133,13 @@ async function fetchStub(url, init = {}) {
     if (world.contextUnavailable) return jsonResponse(503, {});
     const f = world.sessions.get(decodeURIComponent(m[1]));
     if (!f) return jsonResponse(404, {});
+    const params = new URL(u, "http://localhost").searchParams;
     return jsonResponse(200, {
       sessionId: decodeURIComponent(m[1]), filePath: "/fixture/session.jsonl", tree: f.tree ?? [],
       leafId: f.leafId,
-      context: { todoPhases: [], thinkingLevel: "off", model: null, ...f },
+      // pagesOnly mirrors the route: a transcript too long for one page is not
+      // sent unless the caller asks for the whole body.
+      ...(f.pagesOnly && !params.has("context") ? {} : { context: { todoPhases: [], thinkingLevel: "off", model: null, ...f } }),
     });
   }
   if (/^\/api\/models/.test(u)) {
@@ -1969,6 +1976,39 @@ test("idle file-only catch-up updates persisted model, thinking and data context
   assert.deepEqual(w.latest.data.context.entryIds, w.latest.entryIds);
   assert.equal(callsTo("POST", "/api/agent/").length, 0, "reading idle metadata must never spawn a process");
   assert.equal(world.esInstances.length, 0);
+});
+
+test("a session too long for one page opens on its newest page", async () => {
+  resetWorld();
+  const messages = Array.from({ length: 460 }, (_, i) => assistantMsg(`m${i}`, `saved ${i}`));
+  primeSession("s1", messages);
+  // The route omits a transcript that does not fit in one page.
+  world.sessions.get("s1").pagesOnly = true;
+
+  const w = await mountSession("s1");
+
+  assert.equal(w.latest.error, null);
+  const open = callsTo("GET", "/api/sessions/s1?")[0];
+  assert.equal(open.url.includes("context="), false, "an open must not ask for the transcript it is about to page");
+  const page = callsTo("GET", "/api/sessions/s1/context?sync=1")[0];
+  assert.ok(page, "the newest page is read instead");
+  assert.equal(new URL(page.url, "http://localhost").searchParams.get("tail"), "1", "and the first read asks for the newest page");
+  assert.equal(w.latest.entryIds.length, 200, "only one page is delivered");
+  assert.equal(w.latest.entryIds[0], "e260", "and it is the newest one");
+  assert.equal(w.latest.entryIds.at(-1), "e459");
+  assert.equal(w.latest.messages.length, 200);
+  assert.deepEqual(w.latest.data.context.entryIds, w.latest.entryIds);
+  assert.equal(w.latest.activeLeafId, "460");
+});
+
+test("a session that fits in one page still opens in a single request", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q"), assistantMsg("a0", "answer")]);
+  const w = await mountSession("s1");
+
+  assert.equal(w.latest.entryIds.length, 2);
+  assert.equal(callsTo("GET", "/api/sessions/s1?context").length, 0);
+  assert.equal(callsTo("GET", "/api/sessions/s1/context?tail=1").length, 0, "an ordinary session must not pay for a second request");
 });
 
 test("file metadata refresh preserves an active RPC model and thinking choice", async () => {
