@@ -2,7 +2,39 @@ import { historyCursor, type SessionHistoryCursor, type SessionLiveSnapshot, typ
 import type { SessionContext } from "@/lib/types";
 import type { AgentEvent } from "./useAgentSession-stream";
 
-type SessionView = { leafId: string | null; includePreCompaction: boolean };
+export type SessionView = { leafId: string | null; includePreCompaction: boolean };
+
+/**
+ * How much of the selected display path the client actually holds.
+ *
+ * `total` is the server's entry count, `older` whether entries remain before the
+ * window — the two facts a tail-first browser needs, since a windowed transcript
+ * makes the local message count meaningless for both the scroll-up trigger and
+ * the context panel.
+ */
+export interface SessionHistoryWindow {
+  older: boolean;
+  total: number;
+}
+
+/** One paged read of the selected view. Shared by the tail and backwards reads. */
+export function historyPageUrl(sid: string, view: SessionView, cursor: SessionHistoryCursor | null): string {
+  const params = new URLSearchParams({ sync: "1", deferThinking: "1", deferMedia: "1" });
+  if (cursor) params.set("cursor", JSON.stringify(cursor));
+  else params.set("tail", "1");
+  if (view.leafId) params.set("leafId", view.leafId);
+  if (view.includePreCompaction) params.set("includePreCompaction", "1");
+  return `/api/sessions/${encodeURIComponent(sid)}/context?${params}`;
+}
+
+export async function readHistoryPage(sid: string, url: string): Promise<SessionSyncResponse> {
+  const res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const page = await res.json() as SessionSyncResponse;
+  if (page.sessionId !== sid) throw new Error("History page belongs to another session");
+  if (page.context.messages.length !== page.context.entryIds.length) throw new Error("History page is not aligned");
+  return page;
+}
 
 export interface SessionLiveFields {
   message: boolean;
@@ -13,11 +45,23 @@ export interface SessionLiveFields {
 
 export interface SessionCatchUp {
   request(): Promise<SessionContext | null>;
-  seed(context: SessionContext, position?: SessionHistoryCursor | null): SessionContext;
+  /** Read one page before the window's own head and prepend it. */
+  pageBackwards(): Promise<boolean>;
+  seed(
+    context: SessionContext,
+    position?: SessionHistoryCursor | null,
+    /** Set when the seed came from one paged read; a whole transcript has none. */
+    page?: Pick<SessionSyncResponse, "hasMoreBefore" | "total"> | null,
+  ): SessionContext;
   invalidate(): void;
   view(): SessionView;
   position(): SessionHistoryCursor | null;
   history(): SessionContext | null;
+  /** The session `history()` belongs to; null when no view is selected. */
+  historySession(): string | null;
+  window(): SessionHistoryWindow;
+  /** True while entries exist outside the loaded window, on either side. */
+  partial(): boolean;
   select(view: SessionView): void;
   disconnect(): void;
   observe(event: AgentEvent): "epoch" | "stale" | null;
@@ -49,12 +93,25 @@ export function createSessionCatchUp(options: {
   };
   let requested = false;
   let pending: Promise<SessionContext | null> | null = null;
+  // Which slice of the selected path the window covers. `windowTotal` is the
+  // server's entry count; it is only meaningful alongside `older`, because both
+  // describe entries the browser does not hold.
+  let windowTotal = 0;
+  let older = false;
+  // The transcript currently in `context` may belong to a session or a view that
+  // has already been navigated away from; seeding the next one must not read it.
+  let contextSessionId: string | null = null;
+  let backPending: Promise<boolean> | null = null;
 
   const invalidate = () => {
     revision += 1;
     if (pending) requested = true;
   };
-  const seed = (next: SessionContext, position: SessionHistoryCursor | null = cursor) => {
+  const seed = (
+    next: SessionContext,
+    position: SessionHistoryCursor | null = cursor,
+    page: Pick<SessionSyncResponse, "hasMoreBefore" | "total"> | null = null,
+  ) => {
     // A newer completed sync may reflect truncation, not just an append.
     // Keep it and re-read rather than inferring freshness from transcript length.
     if (cursor !== position && context) {
@@ -63,6 +120,12 @@ export function createSessionCatchUp(options: {
     }
     invalidate();
     context = next;
+    contextSessionId = options.sessionId();
+    // A seed from one paged read is a window, and must remember it: without
+    // this the client would treat its newest page as the whole conversation and
+    // never ask for older entries.
+    windowTotal = page ? page.total : next.entryIds.length;
+    older = page ? page.hasMoreBefore : false;
     cursor = historyCursor(next);
     options.history(next, view.leafId);
     return next;
@@ -126,6 +189,11 @@ export function createSessionCatchUp(options: {
             }
             context = nextContext;
             cursor = nextCursor;
+            contextSessionId = sid;
+            // The publishing page is the last one, so its view of the path is the
+            // one the merged window now matches.
+            older = page.hasMoreBefore;
+            windowTotal = page.total;
             loaded = context;
             options.history(context, page.leafId, { version: metadataVersion, hasLive: page.live !== null });
             if (page.live) {
@@ -173,17 +241,80 @@ export function createSessionCatchUp(options: {
     return pending;
   };
 
+  const pageBackwards = (): Promise<boolean> => {
+    const base = context;
+    const anchor = base?.entryIds[0];
+    const sid = options.sessionId();
+    const scope = options.scope();
+    // Nothing to page for, or nothing to page against: a window that already
+    // reaches the head of the path must not issue a request at all.
+    if (!base || !older || anchor === undefined || !sid || scope === null) return Promise.resolve(false);
+    if (backPending) return backPending;
+    const version = revision;
+    const publishedCursor = cursor;
+    backPending = Promise.resolve().then(async () => {
+      try {
+        const page = await readHistoryPage(sid, historyPageUrl(sid, view, {
+          firstEntryId: anchor,
+          lastEntryId: base.entryIds.at(-1) ?? null,
+          anchorEntryId: anchor,
+          direction: "backward",
+        }));
+        if (options.scope() !== scope || revision !== version || cursor !== publishedCursor || options.sessionId() !== sid) return false;
+        if (page.mode !== "prepend") {
+          // The anchor left the selected path (compaction, a branch switch), so
+          // the response describes entries that are not before this window.
+          // Merging it would splice the oldest page onto the newest one; re-read
+          // the tail instead, which is the only page that is correct either way.
+          const tail = await readHistoryPage(sid, historyPageUrl(sid, view, null));
+          seed(tail.context, cursor, tail);
+          return false;
+        }
+        const entryIds = [...page.context.entryIds, ...base.entryIds];
+        const messages = [...page.context.messages, ...base.messages];
+        context = { ...page.context, messages, entryIds };
+        contextSessionId = sid;
+        // The window grew at the FRONT, so the cursor has to be recomputed from
+        // what is now loaded. Keeping the cursor the page was cut from would
+        // make the next forward read start from the whole path's head and hand
+        // back the oldest 200 entries.
+        cursor = historyCursor(context);
+        older = page.hasMoreBefore;
+        windowTotal = page.total;
+        options.history(context, view.leafId);
+        return true;
+      } catch {
+        // A failed page is not a shorter transcript; the window stays as it was
+        // and the next scroll-up retries from the same anchor.
+        return false;
+      }
+    }).finally(() => {
+      backPending = null;
+    });
+    return backPending;
+  };
+
   return {
     request,
+    pageBackwards,
     seed,
     invalidate,
     view: () => view,
     position: () => cursor,
     history: () => context,
+    historySession: () => contextSessionId,
+    window: () => ({ older, total: windowTotal }),
+    partial: () => context !== null && windowTotal > context.entryIds.length,
     select(next: SessionView) {
       invalidate();
       view = next;
       cursor = null;
+      // A different view is a different transcript: the window facts and the
+      // session the context belongs to describe the one being navigated away
+      // from, and reading them would page against the wrong path.
+      windowTotal = 0;
+      older = false;
+      contextSessionId = null;
     },
     disconnect() {
       invalidate();

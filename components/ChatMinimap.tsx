@@ -85,8 +85,22 @@ export function getBarWidth(text: string, isActive: boolean, isHovered: boolean)
 
 const ROW_HEIGHT = 18;
 
+/**
+ * Resolve the highlighted rail row from a stable node id.
+ *
+ * The rail used to hold an index, which a backwards page invalidates: prepending
+ * shifts every `messageIndex`/`refIndex`, so the same number then names a
+ * different prompt and the scroll-spy jumps. Ids survive the shift, so the
+ * active row is stored as one and resolved against the current rail.
+ */
+export function resolveActiveNodeIndex(nodes: NavNode[], activeNodeId: string | null): number {
+  if (activeNodeId === null) return Math.max(0, nodes.length - 1);
+  const found = nodes.findIndex((node) => node.id === activeNodeId);
+  return found >= 0 ? found : 0;
+}
+
 export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer, messageRefs }: Props) {
-  const [activeIndex, setActiveIndex] = useState(0);
+  const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [isRailHovered, setIsRailHovered] = useState(false);
   const railRef = useRef<HTMLDivElement>(null);
@@ -144,6 +158,11 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
     return assistantNodes;
   }, [messages]);
 
+  const activeIndex = resolveActiveNodeIndex(nodes, activeNodeId);
+  const selectNode = useCallback((index: number) => {
+    setActiveNodeId(nodes[index]?.id ?? null);
+  }, [nodes]);
+
   // Smoothly scroll to the target message with multi-strategy element resolution
   const reducedMotion = usePrefersReducedMotion();
   const scrollToNode = useCallback((node: NavNode, smooth = true) => {
@@ -173,11 +192,16 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
     } else {
       const maxScroll = scrollEl.scrollHeight - scrollEl.clientHeight;
       if (maxScroll > 0) {
-        const targetScroll = Math.max(0, (node.messageIndex / Math.max(1, messages.length - 1)) * maxScroll);
+        // No element to aim at (the row is outside the render window). Fall back
+        // to the node's rank in the rail: a message index would be measured
+        // against a transcript that grows at the front as older pages arrive.
+        const rank = nodes.findIndex((candidate) => candidate.id === node.id);
+        const position = rank >= 0 ? rank : nodes.length - 1;
+        const targetScroll = Math.max(0, (position / Math.max(1, nodes.length - 1)) * maxScroll);
         scrollEl.scrollTo({ top: targetScroll, behavior });
       }
     }
-  }, [scrollContainer, messageRefs, messages.length, reducedMotion]);
+  }, [scrollContainer, messageRefs, nodes, reducedMotion]);
 
   const scrollToNodeRef = useRef(scrollToNode);
   scrollToNodeRef.current = scrollToNode;
@@ -191,7 +215,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
 
     // Bottom reached -> last node active
     if (scrollTop + clientHeight >= scrollHeight - 30) {
-      setActiveIndex(nodes.length - 1);
+      setActiveNodeId(nodes.at(-1)?.id ?? null);
       return;
     }
 
@@ -214,8 +238,8 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
       }
     }
 
-    setActiveIndex(bestIdx);
-  }, [scrollContainer, messageRefs, nodes]);
+    selectNode(bestIdx);
+  }, [scrollContainer, messageRefs, nodes, selectNode]);
 
   const updateScrollRef = useRef(updateScroll);
   updateScrollRef.current = updateScroll;
@@ -276,7 +300,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
       const targetIdx = Math.min(nodes.length - 1, Math.floor(ratio * nodes.length));
       if (nodes[targetIdx]) {
         scrollToNodeRef.current(nodes[targetIdx], false);
-        setActiveIndex(targetIdx);
+        selectNode(targetIdx);
         setHoveredIndex(targetIdx);
       }
     };
@@ -296,7 +320,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
 
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
-  }, [nodes]);
+  }, [nodes, selectNode]);
 
   // Interrupted drag cleanup on unmount
   useEffect(() => {
@@ -417,13 +441,13 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
               onClick={(e) => {
                 e.stopPropagation();
                 scrollToNode(node);
-                setActiveIndex(i);
+                selectNode(i);
               }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
                   scrollToNode(node);
-                  setActiveIndex(i);
+                  selectNode(i);
                 }
               }}
               style={{

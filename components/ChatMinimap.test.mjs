@@ -104,3 +104,24 @@ test("falls back to assistant messages when no user prompts exist", () => {
   assert.match(html, /aria-label="Jump to: Welcome to the agent"/);
   assert.match(html, /aria-label="Jump to: Ready for tasks"/);
 });
+
+test("a prepended page keeps the active node on the same prompt", async () => {
+  const { resolveActiveNodeIndex } = await (async () => await jiti.import("./ChatMinimap.tsx"))();
+  const nodes = [
+    { id: "u1", text: "first", messageIndex: 0, refIndex: 0, isUser: true },
+    { id: "u2", text: "second", messageIndex: 1, refIndex: 1, isUser: true },
+  ];
+  assert.equal(resolveActiveNodeIndex(nodes, "u2"), 1);
+
+  // A backwards page shifts every messageIndex, so the rail cannot key the active
+  // row on a position: the node that was active must stay active.
+  const shifted = nodes.map((node) => ({ ...node, messageIndex: node.messageIndex + 200, refIndex: node.refIndex + 200 }));
+  assert.deepEqual(shifted.map((node) => node.messageIndex), [200, 201]);
+  assert.equal(resolveActiveNodeIndex(shifted, "u2"), 1);
+
+  // A node that no longer exists falls back to the start of the rail rather than
+  // keeping an index that now points at a different prompt.
+  assert.equal(resolveActiveNodeIndex([nodes[1]], "u1"), 0);
+  assert.equal(resolveActiveNodeIndex(nodes, null), nodes.length - 1, "no selection tracks the newest prompt");
+  assert.equal(resolveActiveNodeIndex([], null), 0);
+});

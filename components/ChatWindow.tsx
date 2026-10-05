@@ -1,7 +1,7 @@
 "use client";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
-import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { ArrowDown, ChevronDown, ChevronUp, Layers, Paperclip, Square } from "lucide-react";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolCallContent, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
@@ -32,7 +32,11 @@ import { AgentLinkContext, agentLinkTarget } from "@/lib/agent-links";
 import {
   captureScrollDistance,
   getNextVisibleCount,
+  historyLoadAction,
   restoreScrollTop,
+  shouldOfferHistoryLoad,
+  transcriptChange,
+  visibleCountAfterChange,
   VISIBLE_PAGE_SIZE,
 } from "@/lib/chat-lazy-load";
 import { getDraftSummary } from "@/lib/draft-store";
@@ -304,6 +308,9 @@ interface CommittedTranscriptProps {
   nearBottom: boolean;
   sentinelRef: React.RefObject<HTMLButtonElement | null>;
   handleLoadMoreClick: () => void;
+  /** Entries the server holds before the loaded window. Together with the render
+   *  window this decides whether the scroll-up trigger stays on screen. */
+  hasOlderEntries: boolean;
 }
 
 /**
@@ -312,10 +319,11 @@ interface CommittedTranscriptProps {
  * change `streamingMessage`, rendered separately) do not re-run the O(history)
  * grouping/splitting work at display-frame cadence.
  */
-const CommittedTranscript = memo(function CommittedTranscript({
+export const CommittedTranscript = memo(function CommittedTranscript({
   messages, entryIds, conversationMeta, messageRefs, isStreaming, sessionBusy, isNew, forkingEntryId,
   handleFork, handleNavigate, handleEditContent, modelNames, messageCwd, onOpenFile, sessionId,
   toolCallsDefaultCollapsed, hideThinkingBlock, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
+  hasOlderEntries,
 }: CommittedTranscriptProps) {
   const { t } = useI18n();
   const { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage } = conversationMeta;
@@ -416,6 +424,12 @@ const CommittedTranscript = memo(function CommittedTranscript({
     return { startIndex: anchored, hasMore: anchored > 0 };
   }, [rows.length, visibleCount, nearBottom]);
 
+  // The banner is the only trigger for both halves of the window, so it has to
+  // survive the moment the render window covers everything the browser holds.
+  // Anchoring on `hasMore` alone unmounted it after four pages of a 200-entry
+  // window and nothing ever asked for entry 201.
+  const offerLoad = shouldOfferHistoryLoad(hasMore, hasOlderEntries);
+
   const rendered: ReactNode[] = [];
   for (let rowIdx = startIndex; rowIdx < rows.length; rowIdx++) {
     const row = rows[rowIdx];
@@ -470,7 +484,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
   }
   return (
     <>
-      {hasMore && (
+      {offerLoad && (
         <button
           ref={sentinelRef}
           type="button"
@@ -519,6 +533,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
 
   const {
     loading, error, messages, entryIds, showPreCompactionHistory, streamState,
+    hasOlderMessages, loadOlderMessages, loadSessionStats,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, fastModeEnabled, fastModeActive,
     toolPreset,
     liveModelMeta,
@@ -665,8 +680,9 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   }, [session, handleCycleModel, handleCycleThinkingLevel]);
 
   // --- Lazy-load historical messages ---
-  // Only render the last N messages initially. When the user scrolls to the
-  // top, load another page while keeping the scroll position stable.
+  // The transcript is paged twice over. `visibleCount` is the RENDER window over
+  // what the browser holds; the server may hold far more, and that half is driven
+  // by `hasOlderMessages`. The two meet at the sentinel banner.
   const [visibleCount, setVisibleCount] = useState(VISIBLE_PAGE_SIZE);
   const prevSessionKeyForPagingRef = useRef<string | null>(null);
   const sessionKeyForPaging = session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : "empty");
@@ -676,6 +692,18 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       setVisibleCount(VISIBLE_PAGE_SIZE);
     }
   }, [sessionKeyForPaging]);
+  // A prepended page must also enter the render window: end-anchoring it by
+  // message count would leave the newly arrived rows above the window and the
+  // restored viewport showing nothing new.
+  const prevWindowRef = useRef<{ head: string | null; tail: string | null; length: number } | null>(null);
+  useEffect(() => {
+    const next = { head: entryIds[0] ?? null, tail: entryIds.at(-1) ?? null, length: entryIds.length };
+    const previous = prevWindowRef.current;
+    prevWindowRef.current = next;
+    if (!previous) return;
+    const nextCount = visibleCountAfterChange(transcriptChange(previous, next), visibleCount, previous.length, next.length);
+    if (nextCount !== null && nextCount !== visibleCount) setVisibleCount(nextCount);
+  }, [entryIds, visibleCount]);
   const [selectedSubagent, setSelectedSubagent] = useState<SubagentInfo | null>(null);
   // Ref keeps the link handler stable so roster updates do not re-render every
   // MarkdownBody through the context.
@@ -722,6 +750,19 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   // content; "click" (user pressed the banner) reveals the loaded messages at
   // the top of the viewport instead.
   const loadMoreModeRef = useRef<"auto" | "click">("auto");
+  // Refs, not deps: the sentinel must be able to fire again the moment a page
+  // lands, and rebuilding the observer on every window change re-announces the
+  // intersection that triggered it.
+  const hasOlderRef = useRef(hasOlderMessages);
+  hasOlderRef.current = hasOlderMessages;
+  const loadOlderRef = useRef(loadOlderMessages);
+  loadOlderRef.current = loadOlderMessages;
+  const hasHiddenRenderedRef = useRef(false);
+  hasHiddenRenderedRef.current = entryIds.length > visibleCount;
+  const clearPendingRestore = useCallback(() => {
+    prevScrollDistanceRef.current = null;
+    loadMoreModeRef.current = "auto";
+  }, []);
 
   // IntersectionObserver on the sentinel banner at the top of the message
   // list. When the user scrolls near the top, load the next page of older
@@ -737,12 +778,27 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
         // scrollTop = 0 — auto-loading then races the initial scroll-to-bottom
         // (the capture happens before the scroll, and the restore pins the
         // viewport to the top of the last page until every page is loaded).
-        if (entries[0]?.isIntersecting && container.scrollTop > 0) {
-          // Save distance from top before prepending to restore scroll later
-          prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
-          loadMoreModeRef.current = "auto";
+        if (!entries[0]?.isIntersecting || container.scrollTop <= 0) return;
+        // Save distance from top before prepending to restore scroll later.
+        // A transport page does not touch `visibleCount` itself — it grows when
+        // the page lands — so this capture is held across the request and the
+        // single restore below it puts the viewport back over the same content.
+        prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
+        loadMoreModeRef.current = "auto";
+        const action = historyLoadAction(hasHiddenRenderedRef.current, hasOlderRef.current);
+        if (action === "extend-render-window") {
           setVisibleCount((prev) => getNextVisibleCount(prev));
+          return;
         }
+        if (action === "none") {
+          clearPendingRestore();
+          return;
+        }
+        loadOlderRef.current().then((loaded) => {
+          // A refused or failed page leaves the transcript as it was, so the
+          // capture must not be replayed against some unrelated later change.
+          if (!loaded && prevScrollDistanceRef.current !== null) clearPendingRestore();
+        });
       },
       // Expand the root upward so the page loads while the banner is still
       // below the top edge — by the time the user reaches the top, the loaded
@@ -751,11 +807,13 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [visibleCount, messages.length, scrollContainerRef]);
+  }, [visibleCount, messages.length, scrollContainerRef, clearPendingRestore]);
 
   // After visibleCount increases (more messages prepended), restore the
-  // scroll position so the viewport doesn't jump.
-  useEffect(() => {
+  // scroll position so the viewport doesn't jump. A layout effect, not a passive
+  // one: a transport page prepends up to 200 rows, and a passive restore lets the
+  // browser paint the shifted viewport first.
+  useLayoutEffect(() => {
     if (prevScrollDistanceRef.current == null) return;
     const container = scrollContainerRef.current;
     if (!container) return;
@@ -788,8 +846,21 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
     }
     loadMoreModeRef.current = "click";
+    // An explicit request for history the browser has not loaded yet has to reach
+    // the server; widening the render window would only reveal what is already
+    // there and leave the banner up.
+    if (hasOlderMessages) {
+      void loadOlderMessages().then((loaded) => {
+        if (!loaded && prevScrollDistanceRef.current !== null) clearPendingRestore();
+      });
+      return;
+    }
     setVisibleCount((prev) => getNextVisibleCount(prev));
-  }, [scrollContainerRef]);
+  }, [scrollContainerRef, hasOlderMessages, loadOlderMessages, clearPendingRestore]);
+
+  // Stable identity: ChatInput is memoized, and a fresh arrow here would
+  // re-render the whole composer on every transcript change.
+  const requestSessionStats = useCallback(() => { void loadSessionStats(); }, [loadSessionStats]);
 
   const generationSpeedKey = generationSpeed
     ? `${generationSpeed.current ?? "null"}|${generationSpeed.average ?? "null"}`
@@ -1066,6 +1137,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       onCompact={handleCompact}
       contextUsage={contextUsage}
       sessionStats={sessionStats}
+      onRequestSessionStats={requestSessionStats}
       modelCapacity={modelCapacity}
       generationSpeed={generationSpeed}
       onRemoveQueuedMessage={removeQueuedMessage}
@@ -1280,6 +1352,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
               nearBottom={nearBottom}
               sentinelRef={sentinelRef}
               handleLoadMoreClick={handleLoadMoreClick}
+              hasOlderEntries={hasOlderMessages}
             />
             {streamState.isStreaming && streamState.streamingMessage && (
               <MessageView

@@ -29,7 +29,7 @@ import { createActiveGoal, parseActiveGoal, type ActiveGoal, type ActivePlan } f
 import type { HostToolDefinition, HostUriSchemeDefinition, RpcAskDialogAnswer, RpcAvailableSlashCommand, SessionStatsInfo, TodoPhase } from "@/lib/pi-types";
 import { isRecord } from "@/lib/type-guards";
 import { subscribeSessionsChanged } from "@/lib/session-change-bus";
-import { createSessionCatchUp, type SessionCatchUp, type SessionLiveFields } from "./useAgentSession-sync";
+import { createSessionCatchUp, historyPageUrl, readHistoryPage, type SessionCatchUp, type SessionHistoryWindow, type SessionLiveFields, type SessionView } from "./useAgentSession-sync";
 import type { SessionLiveSnapshot, SessionSyncResponse } from "@/lib/session-sync";
 import {
   mergeSubagentRoster,
@@ -168,21 +168,13 @@ function readTerminalAgentError(event: AgentEvent): string | null {
  * walk forward from on a first read. Used only when `/api/sessions/[id]` omitted
  * its transcript because the session does not fit in a single page — an ordinary
  * session still comes back whole and never pays for this second request.
+ *
+ * The whole page is returned, not just its context: `hasMoreBefore`/`total` are
+ * the only place the browser learns the transcript is longer than what it holds,
+ * and without them a windowed client believes it has seen everything.
  */
-async function fetchHistoryWindow(
-  sid: string,
-  view: { leafId: string | null; includePreCompaction: boolean },
-): Promise<SessionContext> {
-  const params = new URLSearchParams({ sync: "1", tail: "1", deferThinking: "1", deferMedia: "1" });
-  if (view.leafId) params.set("leafId", view.leafId);
-  if (view.includePreCompaction) params.set("includePreCompaction", "1");
-  const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/context?${params}`, { signal: AbortSignal.timeout(30_000) });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const page = await res.json() as SessionSyncResponse;
-  if (page.sessionId !== sid) throw new Error("History page belongs to another session");
-  if (page.mode !== "replace" && page.mode !== "append") throw new Error("Unexpected history page mode");
-  if (page.context.messages.length !== page.context.entryIds.length) throw new Error("History page is not aligned");
-  return page.context;
+async function fetchHistoryWindow(sid: string, view: SessionView): Promise<SessionSyncResponse> {
+  return readHistoryPage(sid, historyPageUrl(sid, view, null));
 }
 
 export interface UseAgentSessionOptions {
@@ -283,6 +275,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [slashCommandsLoading, setSlashCommandsLoading] = useState(false);
   const [noticeState, dispatchNotice] = useReducer(noticeReducer, { visible: [], pending: [] });
   const [sessionStatsOverride, setSessionStatsOverride] = useState<SessionStatsInfo | null>(null);
+  // How much of the selected display path the browser actually holds. Mirrored
+  // into state because the catch-up closure mutates it without touching React,
+  // and every change to it lands next to a `history()` publish that re-renders.
+  const [historyWindow, setHistoryWindow] = useState<SessionHistoryWindow>({ older: false, total: 0 });
   const [extensionDialog, setExtensionDialog] = useState<ExtensionUiDialogRequest | null>(null);
   const extensionDialogClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => {
@@ -436,6 +432,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       history: (context, leafId, metadata) => {
         setMessages(context.messages);
         setEntryIds(context.entryIds);
+        setHistoryWindow((previous) => {
+          const next = catchUpRef.current?.window() ?? { older: false, total: 0 };
+          // Identity-stable when the window did not move: this publish happens on
+          // every catch-up, and a fresh object would re-render the composer each
+          // time for nothing.
+          return next.older === previous.older && next.total === previous.total ? previous : next;
+        });
         setData((current) => current ? { ...current, context } : current);
         if (metadata) syncActionsRef.current?.metadata(context, metadata.version, metadata.hasLive);
         if (!agentRunningRef.current) setTodoPhases(context.todoPhases ?? []);
@@ -493,6 +496,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const sessionStats = useMemo(() => {
     if (sessionStatsOverride) return sessionStatsOverride;
+    // A paged transcript is a window, not the conversation. Counting the window
+    // would report the newest 200 messages as the session's totals, so say
+    // nothing until the panel has fetched the real figures from omp.
+    if (historyWindow.total > entryIds.length) return null;
     const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
     let cost = 0;
     let userMessages = 0;
@@ -528,7 +535,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       cost,
       ...(contextUsage ? { contextUsage } : {}),
     } satisfies SessionStatsInfo;
-  }, [messages, sessionStatsOverride, contextUsage, data?.filePath, session?.id, session?.name]);
+  }, [messages, entryIds.length, sessionStatsOverride, contextUsage, historyWindow.total, data?.filePath, session?.id, session?.name]);
+
+  /** The session's real totals. omp owns that accounting, and it reads the whole
+   *  file — so a paged browser has to ask it rather than count its window. */
+  const loadSessionStats = useCallback(async (): Promise<boolean> => {
+    const sid = sessionIdRef.current;
+    if (!sid) return false;
+    try {
+      const stats = await sendAgentCommand<SessionStatsInfo>(sid, { type: "get_session_stats" });
+      if (!stats || sessionIdRef.current !== sid) return false;
+      setSessionStatsOverride(stats);
+      return true;
+    } catch (e) {
+      console.warn("Failed to load session stats:", e);
+      return false;
+    }
+  }, []);
 
   // Goal mode is web-hosted because omp's native /goal is TUI-only. Keep it
   // scoped to its session so switching conversations never leaks objectives.
@@ -773,19 +796,31 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // the new run's optimistic user bubble).
       if (fenceRunId !== undefined && promptRunIdRef.current !== fenceRunId) return null;
       const view = catchUp.view();
-      if (view.leafId || view.includePreCompaction) {
+      // loadSession doubles as a background reconciler (file watcher, agent_end,
+      // compaction), and those callers have no run fence. Re-seeding from the
+      // file would replace a window the user scrolled up through with the single
+      // newest page, so an already-partial window is drained forward instead —
+      // the same append-safe read a catch-up does.
+      const adoptingWindow = catchUp.historySession() === sid && catchUp.partial();
+      if (view.leafId || view.includePreCompaction || adoptingWindow) {
         // A transcript too long for one page arrives without a body; open the
         // newest page of the selected view before draining forward from it.
-        if (!d.context) d.context = catchUp.seed(await fetchHistoryWindow(sid, view), position);
+        if (!adoptingWindow && !d.context) {
+          const page = await fetchHistoryWindow(sid, view);
+          d.context = catchUp.seed(page.context, position, page);
+        }
         if (sessionIdRef.current !== sid || contextRequestSeqRef.current !== requestSeq || promptRunIdRef.current !== requestRun) return null;
         await catchUp.request();
         if (sessionIdRef.current !== sid || contextRequestSeqRef.current !== requestSeq || promptRunIdRef.current !== requestRun) return null;
         d.context = catchUp.history() ?? d.context;
         setShowPreCompactionHistory(view.includePreCompaction);
       } else {
-        const fullContext = d.context ?? await fetchHistoryWindow(sid, view);
+        // A session that fits in one page arrives whole and is seeded as one; a
+        // long one arrives without a body and is seeded from its newest page.
+        let page: SessionSyncResponse | null = null;
+        const fullContext = d.context ?? (page = await fetchHistoryWindow(sid, view)).context;
         if (sessionIdRef.current !== sid || contextRequestSeqRef.current !== requestSeq || promptRunIdRef.current !== requestRun) return null;
-        d.context = catchUp.seed(fullContext, position);
+        d.context = catchUp.seed(fullContext, position, page);
         if (d.context === fullContext) setActiveLeafId(d.leafId);
         setShowPreCompactionHistory(false);
       }
@@ -885,19 +920,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     eventCoalescer.reset();
     dispatch({ type: "reset" });
     try {
-      const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
-      if (leafId) params.set("leafId", leafId);
-      if (includePreCompaction) params.set("includePreCompaction", "1");
-      const url = `/api/sessions/${encodeURIComponent(sid)}/context?${params}`;
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      // This route always answers a whole context (it is not the paged read), so
-      // unlike SessionData its body is not optional.
-      const d = await res.json() as { context: SessionContext };
+      // Opening a branch is opening a view, so it reads like one: the newest
+      // page of the selected path, which for a leaf view ends at the leaf itself.
+      const page = await readHistoryPage(sid, historyPageUrl(sid, { leafId, includePreCompaction }, null));
       // Fence like loadSession: drop the response if the session changed or a
       // newer navigate started while this request was in flight.
       if (sessionIdRef.current !== sid || contextRequestSeqRef.current !== seq || promptRunIdRef.current !== runId) return false;
-      catchUp.seed(d.context, position);
+      // The seed owns the window. Its cursor is the page boundary — derived from
+      // the entries actually loaded — so the drain that follows can only append
+      // onto it; it can never walk back to the head of the path and hand the
+      // browser the oldest page.
+      catchUp.seed(page.context, position, page);
       setShowPreCompactionHistory(includePreCompaction);
       void catchUp.request();
     } catch (e) {
@@ -3034,10 +3067,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
         case "session": {
           if (!sid) return complete({ handled: true, error: translate("agentSession.noActiveSession") });
-          const stats = await sendAgentCommand<SessionStatsInfo>(sid, { type: "get_session_stats" });
-          if (stats) {
-            setSessionStatsOverride(stats);
-          }
+          await loadSessionStats();
           onSessionStatsPanelOpen?.();
           return complete({ handled: true, action: "openSessionStats" });
         }
@@ -3097,7 +3127,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setIsCompacting(false);
       }
     }
-  }, [addNotice, advisorEnabled, ensureNewSession, handleSend, isCompacting, loadModels, loadSession, loadSlashCommands, promoteNewSession, onSessionStatsPanelOpen]);
+  }, [addNotice, advisorEnabled, ensureNewSession, handleSend, isCompacting, loadModels, loadSession, loadSessionStats, loadSlashCommands, promoteNewSession, onSessionStatsPanelOpen]);
 
   // Queued (undelivered) messages live in the queue panel only; the chat gets
   // the real user message when pi delivers it (user message_end event). An
@@ -3506,13 +3536,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return () => clearTimeout(t);
   }, [noticeState.visible]);
 
+  // Fetched totals describe the whole session, so nothing about the loaded
+  // window invalidates them. Keyed on the window's TAIL rather than its length:
+  // a backwards page grows the transcript without changing the tail, and
+  // clearing on length is what threw those counts away mid-scroll-up.
+  const sessionStatsTailRef = useRef<string | null>(null);
   useEffect(() => {
+    const tail = entryIds.at(-1) ?? null;
+    if (sessionStatsTailRef.current === tail) return;
+    sessionStatsTailRef.current = tail;
     setSessionStatsOverride(null);
-  }, [messages.length, contextUsage?.tokens, contextUsage?.percent, contextUsage?.contextWindow]);
+  }, [entryIds]);
 
   return {
     // State
     data, loading, error, activeLeafId, messages, entryIds, showPreCompactionHistory, streamState,
+    // Tail-first transport paging: what the server holds beyond the loaded window.
+    hasOlderMessages: historyWindow.older, historyTotal: historyWindow.total, loadOlderMessages: catchUp.pageBackwards,
+    loadSessionStats,
     agentRunning, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel, fastModeEnabled, fastModeActive, autoRetryEnabled, interruptMode, autoCompactionEnabled, steeringMode, followUpMode,
     liveModelMeta,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
