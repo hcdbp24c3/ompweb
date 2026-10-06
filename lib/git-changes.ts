@@ -36,7 +36,11 @@ async function findRepositoryRoot(cwd: string): Promise<string | null> {
   }
 }
 
-function isWithinPath(parent: string, target: string): boolean {
+/** Whether `target` is `parent` or lives under it. Exported rather than copied:
+ *  `getGitStatus` filters the file list with this, and a commit has to honour
+ *  the same boundary (lib/git-write.ts) — two copies of a containment check are
+ *  free to disagree about exactly the case that matters. */
+export function isWithinPath(parent: string, target: string): boolean {
   const relative = path.relative(path.resolve(parent), path.resolve(target));
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
