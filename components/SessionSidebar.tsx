@@ -59,6 +59,7 @@ interface Props {
   selectedCwd?: string | null;
   onCwdChange?: (cwd: string | null, projectRoot?: string | null) => void;
   onWorkspaceOptionsChange?: (projects: ManagedProject[], selectedProject: string | null, cwd: string | null) => void;
+  onProjectsSettled?: () => void;
   addProjectOpen: boolean;
   setAddProjectOpen: (open: boolean) => void;
   /** Shows the provider usage bar above Settings; toggle lives in Settings. */
@@ -78,7 +79,7 @@ interface Props {
 
 
 
-export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onWorkspaceOptionsChange, addProjectOpen, setAddProjectOpen, usageVisible = true, onOpenSettings, onOpenArchive, updateAvailable, settingsOpen = false }: Props) {
+export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onWorkspaceOptionsChange, onProjectsSettled, addProjectOpen, setAddProjectOpen, usageVisible = true, onOpenSettings, onOpenArchive, updateAvailable, settingsOpen = false }: Props) {
 
 
   const { t } = useI18n();
@@ -219,11 +220,16 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       setProjects(data.projects ?? []);
       setProjectsError(null);
       projectsLoadedRef.current = true;
+      onProjectsSettled?.();
     } catch (e) {
       if (seq !== projectsLoadSeqRef.current) return;
       setProjectsError(t("projects.loadFailed", { detail: e instanceof Error ? e.message : String(e) }));
+      // A failed load still settles the question "is this a first run?" — the
+      // answer is no, and leaving it unanswered shows the beginner screen over
+      // an app that is merely having a bad fetch.
+      onProjectsSettled?.();
     }
-  }, [t]);
+  }, [t, onProjectsSettled]);
 
   useEffect(() => {
     void loadProjects();

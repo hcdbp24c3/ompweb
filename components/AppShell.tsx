@@ -111,6 +111,9 @@ export function AppShell() {
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
   const [workspaceOptions, setWorkspaceOptions] = useState<{ projects: ManagedProject[]; selectedProject: string | null; cwd: string | null }>({ projects: [], selectedProject: null, cwd: null });
   const [addProjectOpen, setAddProjectOpen] = useState(false);
+  const handleProjectsSettled = useCallback(() => {
+    setProjectsSettled(true);
+  }, []);
   const handleWorkspaceOptionsChange = useCallback((projects: ManagedProject[], selectedProject: string | null, cwd: string | null) => {
     setWorkspaceOptions({ projects, selectedProject, cwd });
   }, []);
@@ -1033,6 +1036,11 @@ export function AppShell() {
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !initialSessionId);
+  // Set once /api/projects has answered either way. Until then we do not know
+  // whether this is a returning user, so the "get started" screen would flash
+  // on every reload and then swap for the workspace — initialSessionRestored is
+  // optimistic about the session half, but nothing was optimistic about projects.
+  const [projectsSettled, setProjectsSettled] = useState(false);
   // During the initial URL restore the sidebar adopts the restored cwd and
   // notifies us; that first onCwdChange must not bump sessionKey. We store the
   // expected cwd string and only skip when it matches, so a failure to fire
@@ -1570,7 +1578,11 @@ export function AppShell() {
     };
   }, [hasGenerationSpeed, isMobile, locale, rightPanelOpen, showChat]);
   // While restoring initial session from URL, don't show the placeholder
-  const showPlaceholder = initialSessionRestored && !showChat;
+  // A first run has no projects, and only then is "get started" the truth. While
+  // the list is still in flight the answer is unknown, so the skeleton stands in:
+  // the sidebar adopts the project in the effect AFTER its restore runs, and that
+  // gap is exactly what used to render the beginner screen mid-reload.
+  const showPlaceholder = initialSessionRestored && projectsSettled && !showChat;
 
   const sidebarHistory = useSidebarHistory({
     active: isMobile && (showChat || Boolean(initialSessionId)),
@@ -1613,6 +1625,7 @@ export function AppShell() {
       selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
       onCwdChange={handleCwdChange}
       onWorkspaceOptionsChange={handleWorkspaceOptionsChange}
+      onProjectsSettled={handleProjectsSettled}
       addProjectOpen={addProjectOpen}
       setAddProjectOpen={setAddProjectOpen}
       usageVisible={providerUsageVisible}
