@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSharedPtyRegistry, TooManyTerminalsError, type TerminalHandle } from "@/lib/terminal/pty-registry";
 import { guardTerminalCwd } from "@/lib/terminal/guard";
 import { ghEnvForSpawn } from "@/lib/gh-env";
+import { gitIdentityEnvForSpawn } from "@/lib/git-identity";
 
 export const dynamic = "force-dynamic";
 
@@ -38,7 +39,11 @@ export async function GET(request: Request) {
     // The gh token for this repository, resolved before attach because attach is
     // synchronous. Cached per cwd in lib/gh-env.ts, so re-opening the panel costs
     // one map lookup rather than a credential-store read and a git spawn.
-    handle = registry.attach(cwd, cols, rows, { env: await ghEnvForSpawn(cwd) });
+    // The identity rides along for the same reason and the same way: a `git
+    // commit` typed here is the commit surface this task has to make state, and
+    // an unset identity has to show up as an empty environment (git then reports
+    // it in its own words) rather than as somebody else's name.
+    handle = registry.attach(cwd, cols, rows, { env: { ...(await ghEnvForSpawn(cwd)), ...(await gitIdentityEnvForSpawn(cwd)) } });
   } catch (error) {
     if (error instanceof TooManyTerminalsError) {
       return NextResponse.json(

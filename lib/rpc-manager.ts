@@ -5,6 +5,7 @@ import { validateAgentImages } from "./image-attachments";
 import { hasVisibleAssistantContent } from "./assistant-response";
 import { invalidateModelsCache } from "./models-cache";
 import { ghEnvForSpawn } from "./gh-env";
+import { gitIdentityEnvForSpawn } from "./git-identity";
 import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
 import { readNativeSettings } from "./omp/settings-config";
 import {
@@ -1139,7 +1140,11 @@ export class AgentSessionWrapper {
         // cannot read leaves the child without a token rather than failing to
         // start. See lib/gh-env.ts; RpcProcessOptions.env is the seam, and its
         // own test pins that these names survive sanitization.
-        env: await ghEnvForSpawn(this.cwd),
+        // The commit identity is merged in the same way and for the same reason:
+        // an agent running `git commit` in this session must author as this
+        // repository's identity. Neither may write ~/.gitconfig, so the child
+        // environment is the only channel either has.
+        env: { ...(await ghEnvForSpawn(this.cwd)), ...(await gitIdentityEnvForSpawn(this.cwd)) },
         onExit: (info) => {
           if (this.proc === proc) this.handleProcessExit(info, proc);
         },
@@ -1796,8 +1801,10 @@ export async function startRpcSession(
       // starts), so the token the repository resolves to has to be in its
       // environment at spawn. Per-cwd, because two sessions in two repositories
       // must not share an account — and an empty answer is a normal outcome,
-      // not a failure, so it never throws.
-      env: await ghEnvForSpawn(cwd),
+      // not a failure, so it never throws. The commit identity resolves per-cwd
+      // for the same reason: git reads it from the environment, never from a
+      // ~/.gitconfig this app must not write.
+      env: { ...(await ghEnvForSpawn(cwd)), ...(await gitIdentityEnvForSpawn(cwd)) },
       onExit: (info) => holder.wrapper?.handleProcessExit(info, proc),
     });
     const created = new AgentSessionWrapper(
