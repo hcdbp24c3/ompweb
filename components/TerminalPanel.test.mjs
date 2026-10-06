@@ -270,7 +270,7 @@ test("opening the panel asks for the cwd's stream and never for a shell kill", a
     "opening a tab must not kill the shell it is about to use");
 });
 
-test("stopping the shell posts the cwd to /close once and reconnects", async () => {
+test("stopping the shell posts the cwd to /close once and stays stopped", async () => {
   // Idle reaping cannot fire while the panel holds a listener, and the right panel
   // never unmounts a visited view — so without this control the only ways to end
   // a shell are a workspace change or a server restart.
@@ -285,7 +285,14 @@ test("stopping the shell posts the cwd to /close once and reconnects", async () 
   const stops = posts.filter((p) => p.url.includes("/api/terminal/close"));
   assert.equal(stops.length, 1, "a double click must not kill two shells or re-post");
   assert.deepEqual(stops[0].body, { cwd: "/repo" });
-  assert.equal(streams.length, 2, "the panel reconnects instead of watching the shell it just killed");
+  // It must NOT reconnect. Reopening the stream calls the registry's attach(),
+  // which spawns a shell — so "stop" that restarts is not a stop at all, it is a
+  // shell that reopens itself the moment you press the button.
+  assert.equal(streams.length, 1, "stop must not open a new stream, or the shell respawns");
+  assert.ok(
+    screen.getByRole("button", { name: /start|again|new shell/i }),
+    "and the panel must offer a way to start one deliberately",
+  );
 });
 
 test("a replay frame and a later output frame are both delivered verbatim", async () => {

@@ -217,8 +217,13 @@ export function TerminalPanel({
    * Kills the shell now. Idle reaping cannot do it while this panel holds a
    * listener, and a visited right-panel view is never unmounted, so without an
    * explicit control the shell would live until the workspace changed or the
-   * server restarted. The restart then gives the panel a stream of its own
-   * rather than leaving it holding a listener to the pty that was just killed.
+   * server restarted.
+   *
+   * This deliberately does NOT bump restartKey. That key is in the connect
+   * effect's dependencies, and opening the stream is what calls the registry's
+   * attach(), which spawns a shell — so reconnecting here made the button
+   * respawn the shell it had just killed, within the same tick. Stop ends the
+   * session; only the panel's own "start a new shell" control brings one back.
    */
   const stopShell = useCallback(async (): Promise<void> => {
     if (!cwd || stoppingRef.current) return;
@@ -236,7 +241,9 @@ export function TerminalPanel({
     } finally {
       stoppingRef.current = false;
       setStopping(false);
-      setRestartKey((value) => value + 1);
+      // Same terminal state the exit frame produces: the shell is gone, so the
+      // panel stops reading and offers a deliberate restart instead of taking one.
+      setOutcome({ kind: "ended" });
     }
   }, [cwd]);
 
