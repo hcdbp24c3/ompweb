@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, renameSync, statSync } from "fs";
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync } from "fs";
 import { join } from "path";
 import { getConfigRoot } from "@/lib/omp/paths";
 
@@ -16,6 +16,7 @@ export async function register(): Promise<void> {
     console.log(
       `[omp-web] starting (agent-dir ${getAgentDir()})`,
     );
+    warnIfSessionsLookLost(getAgentDir());
   } catch {
     // Diagnostics are best-effort.
   }
@@ -107,4 +108,58 @@ export async function register(): Promise<void> {
     }
   }, 15_000);
   watchdog.unref?.();
+}
+
+/**
+ * A fresh install and a lost volume mount look identical from inside: an
+ * agent dir with no sessions. What makes them distinguishable is the mount
+ * table — a `VOLUME /root/.omp` in the image plus a volume mounted at `/root`
+ * leaves `/root/.omp` as its own anonymous volume on top of the real one, so
+ * `omp update` (which recreates the container) silently mounts an empty
+ * directory over the host's. Repositories under `/root` survive; every
+ * session, credential and models.yml vanishes, with no error anywhere.
+ *
+ * That is silent data loss, so say it at boot rather than letting the user
+ * discover it by finding an empty session list.
+ */
+function warnIfSessionsLookLost(agentDir: string): void {
+  const sessionsDir = join(agentDir, "sessions");
+  let entries: string[];
+  try {
+    entries = readdirSync(sessionsDir);
+  } catch {
+    return; // No sessions dir at all is a brand-new install; nothing to say.
+  }
+  if (entries.some((name) => name.endsWith(".jsonl") || !name.startsWith("."))) return;
+
+  // A volume mounted on the agent dir is the expected, correct setup — it just
+  // has no sessions yet. The dangerous shape is the agent dir sitting INSIDE a
+  // different mount, which is what an anonymous volume over /root/.omp looks
+  // like from inside the container.
+  let mounts: string;
+  try {
+    mounts = readFileSync("/proc/mounts", "utf8");
+  } catch {
+    return; // Not Linux; /proc/mounts is the only portable-enough source here.
+  }
+  const mounted = mounts
+    .split("\n")
+    .map((line) => line.split(/\s+/))
+    .filter((parts) => parts.length > 2)
+    .some(([, point]) => point === agentDir);
+  if (!mounted) return;
+
+  console.warn(
+    [
+      "",
+      `[omp-web] WARNING: ${agentDir} is a mount point and contains no sessions.`,
+      "  This is what a lost volume mount looks like from inside the container:",
+      "  a repository under /root surviving while every session disappears means",
+      "  /root/.omp was replaced by a fresh empty volume on the last recreate.",
+      "  If you expected sessions here, stop the container and check the host's",
+      "  /root/.omp before starting it again, then mount that path explicitly",
+      "  (volumes: [\"./omp-data:/root/.omp\"]). See the note in the Dockerfile.",
+      "",
+    ].join("\n"),
+  );
 }

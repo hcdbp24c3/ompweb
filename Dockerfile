@@ -127,9 +127,21 @@ COPY --from=builder /app/lib ./lib
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/scripts ./scripts
 
-# omp reads agent state, sessions, credentials and models.yml from here. Mount a
-# volume over it to keep sessions across container restarts.
-VOLUME ["/root/.omp"]
+# omp reads agent state, sessions, credentials and models.yml from /root/.omp.
+#
+# There is deliberately NO `VOLUME ["/root/.omp"]` here any more. A declared
+# VOLUME turns the path into an anonymous volume mount, and that silently
+# breaks the common deployment: mounting a volume at /root (to keep cloned
+# repositories) leaves /root/.omp as a *separate* anonymous volume sitting on
+# top of the real one. Every `docker rm` + run — which is what an `omp update`
+# does — allocates a fresh EMPTY anonymous volume and masks the host's
+# /root/.omp. The repositories under /root survive; every session, credential
+# and models.yml silently disappears, with no error anywhere.
+#
+# Mount the path yourself and make it explicit:
+#   volumes: ["./omp-data:/root/.omp"]      # or a named volume
+# Unmounted, state lives in the container layer and is lost on recreate — which
+# is now visible rather than implied.
 
 ENV NODE_ENV=production \
     OMP_WEB_HOSTNAME=0.0.0.0 \
