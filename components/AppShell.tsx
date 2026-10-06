@@ -1582,7 +1582,14 @@ export function AppShell() {
   // the list is still in flight the answer is unknown, so the skeleton stands in:
   // the sidebar adopts the project in the effect AFTER its restore runs, and that
   // gap is exactly what used to render the beginner screen mid-reload.
-  const showPlaceholder = initialSessionRestored && projectsSettled && !showChat;
+  // The beginner screen is a FIRST-RUN affordance: it tells someone with no
+  // workspace where to start. Once the project list has settled and any project
+  // exists, showing it is simply wrong — the sidebar adopts the project in the
+  // effect AFTER its restore runs, and that gap must stay a skeleton.
+  // Measured with a MutationObserver: gating on projectsSettled alone still left
+  // it up for 300ms+, because the list settles before activeCwd arrives.
+  const showPlaceholder =
+    initialSessionRestored && projectsSettled && workspaceOptions.projects.length === 0 && !showChat;
 
   const sidebarHistory = useSidebarHistory({
     active: isMobile && (showChat || Boolean(initialSessionId)),
