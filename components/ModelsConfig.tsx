@@ -1847,7 +1847,10 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
     }
   }, []);
 
-  const loadConfig = useCallback(() => {
+  /** `keepSelection` is what Cancel needs: a cancel must return to the list, but
+   *  the default re-picks the first provider after the fetch resolves — which
+   *  would override the navigation the caller just performed. */
+  const loadConfig = useCallback(({ keepSelection = false }: { keepSelection?: boolean } = {}) => {
     setLoading(true);
     fetch("/api/models-config")
       .then((r) => r.json())
@@ -1862,7 +1865,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
         const normalized = d.providers ? d : { ...d, providers: {} };
         setConfig(normalized);
         const keys = Object.keys(normalized.providers ?? {});
-        if (!embedded && keys.length > 0) setSelection({ type: "provider", name: keys[0] });
+        if (!embedded && !keepSelection && keys.length > 0) setSelection({ type: "provider", name: keys[0] });
       })
       .catch(() => setConfig({ providers: {} }))
       .finally(() => setLoading(false));
@@ -2223,7 +2226,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
               borderRadius: 6, color: "var(--text-muted)", fontSize: 11, fontFamily: "var(--font-mono)",
               whiteSpace: "pre-wrap", wordBreak: "break-word", overflowX: "auto",
             }}>{parseError.message}</pre>
-            <button onClick={loadConfig} disabled={loading}
+            <button onClick={() => loadConfig()} disabled={loading}
               style={{ alignSelf: "flex-start", padding: "5px 12px", background: "none", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text-muted)", cursor: loading ? "default" : "pointer", fontSize: 12 }}>
               {loading ? t("modelsConfig.loading") : t("modelsConfig.reload")}
             </button>
@@ -2855,7 +2858,17 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
               </div>
             )}
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <button onClick={() => loadConfig()} disabled={loading} style={{ padding: "6px 14px", background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", cursor: "pointer", fontSize: 12.5 }}>
+              <button
+                onClick={() => {
+                  // Discard the edits, then leave the editor. Reloading alone used
+                  // to leave you inside a provider you never opened, because the
+                  // reload re-picks the first one once the fetch resolves.
+                  setSelection(null);
+                  loadConfig({ keepSelection: true });
+                }}
+                disabled={loading}
+                style={{ padding: "6px 14px", background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", cursor: "pointer", fontSize: 12.5 }}
+              >
                 {t("modelsConfig.cancel")}
               </button>
               <button onClick={handleSave} disabled={saving || savedOk || parseError !== null} style={{
