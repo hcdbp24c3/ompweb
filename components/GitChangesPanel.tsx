@@ -13,6 +13,7 @@ import {
   normalizeFilePathSlashes,
 } from "@/lib/file-paths";
 import { pruneTickedPaths, toggleTickedPath } from "@/lib/git-file-selection";
+import { summarizeTickedChanges } from "@/lib/commit-message";
 import type { GitFileDiffResponse, GitStatusResponse } from "@/lib/git-types";
 import type { GitOperation, GitOperationKind } from "@/hooks/useGitActions";
 
@@ -204,8 +205,7 @@ export function GitChangesPanel({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  const [patch, setPatch] = useState<string | null>(null);
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);  const [patch, setPatch] = useState<string | null>(null);
   const [patchSupported, setPatchSupported] = useState(true);
   const [patchLoading, setPatchLoading] = useState(false);
   const [patchError, setPatchError] = useState<string | null>(null);
@@ -233,6 +233,15 @@ export function GitChangesPanel({
   // render must not re-report an unchanged set.
   const onTickedPathsChangeRef = useRef(onTickedPathsChange);
   onTickedPathsChangeRef.current = onTickedPathsChange;
+
+  /** Pair the ticked paths with the status list and derive the subject. Kept
+   *  here because the tick set and the file list are both local to this panel;
+   *  the derivation itself is pure and lives in `lib/commit-message`. */
+  const suggestMessageFromTicks = useCallback(() => {
+    const ticked = new Set(tickedPaths);
+    const subject = summarizeTickedChanges(files.filter((file) => ticked.has(file.filePath)));
+    if (subject) onCommitMessageChange(subject);
+  }, [files, tickedPaths, onCommitMessageChange]);
 
   useEffect(() => {
     onTickedPathsChangeRef.current?.([...tickedPaths]);
@@ -759,6 +768,27 @@ export function GitChangesPanel({
             onFocus={(e) => { e.currentTarget.style.borderColor = "var(--accent)"; }}
             onBlur={(e) => { e.currentTarget.style.borderColor = "var(--border)"; }}
           />
+          {/* Fills the box from the ticked files' own change kinds. A button, not
+              an effect: auto-filling on every tick change would overwrite a message
+              the user had already started typing. */}
+          <button
+            type="button"
+            className="git-suggest-message"
+            disabled={tickedPaths.size === 0 || commitMessage.trim().length > 0}
+            onClick={suggestMessageFromTicks}
+            style={{
+              marginTop: 5,
+              padding: "3px 8px",
+              fontSize: 11,
+              background: "transparent",
+              color: tickedPaths.size === 0 ? "var(--text-dim)" : "var(--text-muted)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-control)",
+              cursor: tickedPaths.size === 0 ? "default" : "pointer",
+            }}
+          >
+            {t("gitChanges.suggestMessage")}
+          </button>
         </div>
       )}
 

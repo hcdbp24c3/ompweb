@@ -1680,6 +1680,7 @@
   "gitChanges.filesChanged.other": "{count} 个改动的文件",
   "gitChanges.commitMessage": "提交信息",
   "gitChanges.commitMessagePlaceholder": "描述这次改动…",
+  "gitChanges.suggestMessage": "根据改动生成提交信息",
   "gitChanges.commit": "提交",
   "gitChanges.push": "推送",
   "gitChanges.pull": "拉取",

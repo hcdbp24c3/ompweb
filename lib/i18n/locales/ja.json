@@ -1680,6 +1680,7 @@
   "gitChanges.filesChanged.other": "変更 {count} ファイル",
   "gitChanges.commitMessage": "コミットメッセージ",
   "gitChanges.commitMessagePlaceholder": "変更内容を入力…",
+  "gitChanges.suggestMessage": "変更内容からメッセージを生成",
   "gitChanges.commit": "コミット",
   "gitChanges.push": "プッシュ",
   "gitChanges.pull": "プル",

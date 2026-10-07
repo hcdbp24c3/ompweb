@@ -701,6 +701,7 @@
   "gitChanges.filesChanged.other": "{count} changed files",
   "gitChanges.commitMessage": "Commit message",
   "gitChanges.commitMessagePlaceholder": "Describe the change…",
+  "gitChanges.suggestMessage": "Suggest message from changes",
   "gitChanges.commit": "Commit",
   "gitChanges.push": "Push",
   "gitChanges.pull": "Pull",
