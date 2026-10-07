@@ -172,6 +172,23 @@ function ensureKey(): Buffer {
   return key;
 }
 
+/**
+ * The envelope primitive, shared with `lib/api-key-store.ts`.
+ *
+ * Deliberately a thin wrapper rather than a refactor: AES-256-GCM behind a key
+ * file is the whole reason an AI provider key and a git token are both safe to
+ * write to the persisted agent dir, and there is one key file for both, so one
+ * file to back up and one to rotate. The crypto itself is untouched — only
+ * these two bindings are exported.
+ */
+export function encryptSecretEnvelope(plaintext: string): string {
+  return encryptSecret(plaintext);
+}
+
+export function decryptSecretEnvelope(envelope: unknown): string | undefined {
+  return decryptSecret(envelope);
+}
+
 function encryptSecret(plaintext: string): string {
   const iv = randomBytes(12);
   const cipher = createCipheriv(CIPHER, ensureKey(), iv);

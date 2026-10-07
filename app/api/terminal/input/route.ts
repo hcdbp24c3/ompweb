@@ -3,6 +3,7 @@ import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-fo
 import { getSharedPtyRegistry, TooManyTerminalsError, type TerminalHandle } from "@/lib/terminal/pty-registry";
 import { guardTerminalCwd } from "@/lib/terminal/guard";
 import { ghEnvForSpawn } from "@/lib/gh-env";
+import { loadWebSearchEnv } from "@/lib/api-key-store";
 import { gitIdentityEnvForSpawn } from "@/lib/git-identity";
 
 export const dynamic = "force-dynamic";
@@ -103,7 +104,7 @@ export async function POST(request: Request) {
     // spawn. It is cached per cwd, so the common case (a live shell, where the
     // override is discarded) costs one map lookup per keystroke. The commit
     // identity is resolved with it, for the same reason.
-    handle = registry.attach(cwd, 80, 24, { env: { ...(await ghEnvForSpawn(cwd)), ...(await gitIdentityEnvForSpawn(cwd)) } });
+    handle = registry.attach(cwd, 80, 24, { env: { ...(await ghEnvForSpawn(cwd)), ...(await gitIdentityEnvForSpawn(cwd)), ...loadWebSearchEnv() } });
   } catch (error) {
     if (error instanceof TooManyTerminalsError) {
       return NextResponse.json(
