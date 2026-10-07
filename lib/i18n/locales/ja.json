@@ -787,6 +787,7 @@
   "modelsConfig.alreadyConnected": "既に接続されています。再ログインまたは切断ができます。",
   "modelsConfig.api": "API",
   "modelsConfig.apiKey": "APIキー",
+  "modelsConfig.webSearchProviders": "ウェブ検索",
   "modelsConfig.terminalOnly": "ターミナルのみ",
   "modelsConfig.terminalOnlyHint": "このプロバイダのサインインはブラウザから完了できません。ターミナルで `omp` を実行して /login を使うか、プロバイダの環境変数を設定してください。",
   "modelsConfig.terminalOnlyHidden": "ターミナルが必要な {count} 件のプロバイダはここには表示されません。",

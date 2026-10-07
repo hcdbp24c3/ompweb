@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/primitives";
 import { Plus, Trash2, ArrowDown, ArrowUp } from "lucide-react";
 import { toast } from "@/components/ui/toast";
+import { partitionByWebSearch } from "@/lib/web-search-providers";
 import {
   NATIVE_MODEL_ROLES,
   modelLabel,
@@ -404,6 +405,12 @@ export function AddProviderPicker({
   // rather than what the current query happens to match.
   const terminalOnlyCount = oauthProviders.filter((p) => p.terminalOnly && !p.loggedIn).length;
   const availableApiKey = apiKeyProviders.filter((p) => !p.configured && (!q || p.displayName.toLowerCase().includes(q) || p.id.toLowerCase().includes(q)));
+
+  // Split so the search backends are not filed beside the model providers: the
+  // picker is a flat grid, and mixing "Exa" in with "Anthropic" made both harder
+  // to find. A misclassified id lands in the section it was already in, so the
+  // worst case is a card in the wrong group — never a missing one.
+  const { ai: availableApiKeyAi, webSearch: availableApiKeyWeb } = partitionByWebSearch(availableApiKey);
   const showCustom = !q || "custom".includes(q);
 
   const totalCount = availableOAuth.length + availableApiKey.length + (showCustom ? 1 : 0);
@@ -515,10 +522,27 @@ export function AddProviderPicker({
                 </button>
               ))}
 
-              {availableApiKey.length > 0 && (
+              {availableApiKeyWeb.length > 0 && (
+                <div style={{ gridColumn: "1 / -1", paddingTop: 8, fontSize: 10, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em" }}>{t("modelsConfig.webSearchProviders")}</div>
+              )}
+              {availableApiKeyWeb.map((p) => (
+                <button key={p.id} type="button" onClick={() => { onSelectApiKey(p.id); onClose(); }}
+                  style={cardStyle}
+                  onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--accent)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.borderColor = "var(--border)"; e.currentTarget.style.background = "var(--bg-panel)"; }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.displayName}</div>
+                    <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>{tn("modelsConfig.modelCount", p.modelCount)}</div>
+                  </div>
+                  <ProviderIcon id={p.id} size={28} />
+                </button>
+              ))}
+
+              {availableApiKeyAi.length > 0 && (
                 <div style={{ gridColumn: "1 / -1", paddingTop: availableOAuth.length > 0 ? 6 : 0, fontSize: 10, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em" }}>{t("modelsConfig.apiKey")}</div>
               )}
-              {availableApiKey.map((p) => (
+              {availableApiKeyAi.map((p) => (
                 <button key={p.id} type="button" onClick={() => { onSelectApiKey(p.id); onClose(); }}
                   style={cardStyle}
                   onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--accent)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
