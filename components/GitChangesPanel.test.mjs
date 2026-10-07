@@ -26,7 +26,7 @@ import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
 const { GitChangesPanel } = await jiti.import("./GitChangesPanel.tsx");
-const { translatePlural } = await jiti.import("@/lib/i18n");
+const { translate, translatePlural } = await jiti.import("@/lib/i18n");
 
 const REPO = "/repo";
 const OTHER = "/other";
@@ -98,9 +98,29 @@ function renderPanel(props = {}) {
       cwd: REPO,
       onOpenFile() {},
       onTickedPathsChange(paths) { reports.push([...paths]); },
+      commitMessage: "",
+      onCommitMessageChange() {},
+      operation: null,
+      canCancelOperation: false,
+      onCancelOperation() {},
       ...props,
     }),
   );
+}
+
+/** The same props for a rerender, so a cwd switch keeps the commit surface. */
+function panelProps(props = {}) {
+  return {
+    cwd: REPO,
+    onOpenFile() {},
+    onTickedPathsChange(paths) { reports.push([...paths]); },
+    commitMessage: "",
+    onCommitMessageChange() {},
+    operation: null,
+    canCancelOperation: false,
+    onCancelOperation() {},
+    ...props,
+  };
 }
 
 const lastReported = () => reports.at(-1);
@@ -252,13 +272,7 @@ test("changing cwd clears the selection before the new status arrives", async ()
   // The new cwd's status request never answers, so anything the panel still
   // holds can only have been dropped by the cwd change itself.
   holdStatusCwd = OTHER;
-  view.rerender(
-    React.createElement(GitChangesPanel, {
-      cwd: OTHER,
-      onOpenFile() {},
-      onTickedPathsChange(paths) { reports.push([...paths]); },
-    }),
-  );
+  view.rerender(React.createElement(GitChangesPanel, panelProps({ cwd: OTHER })));
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
   assert.deepEqual(lastReported(), []);
   assert.deepEqual(tickedBoxes(), []);
@@ -275,13 +289,7 @@ test("a cwd change clears the selection even when the new cwd names the same dir
   fireEvent.click(tickFor(B));
   assert.deepEqual(lastReported(), [A, B]);
 
-  view.rerender(
-    React.createElement(GitChangesPanel, {
-      cwd: `${REPO}/`,
-      onOpenFile() {},
-      onTickedPathsChange(paths) { reports.push([...paths]); },
-    }),
-  );
+  view.rerender(React.createElement(GitChangesPanel, panelProps({ cwd: `${REPO}/` })));
   await settle();
   assert.deepEqual(lastReported(), []);
 });
@@ -291,13 +299,7 @@ test("a tick made in the new cwd is kept", async () => {
   // usable again.
   const view = await renderSettled();
   fireEvent.click(tickFor(A));
-  view.rerender(
-    React.createElement(GitChangesPanel, {
-      cwd: OTHER,
-      onOpenFile() {},
-      onTickedPathsChange(paths) { reports.push([...paths]); },
-    }),
-  );
+  view.rerender(React.createElement(GitChangesPanel, panelProps({ cwd: OTHER })));
   await settle();
   fireEvent.click(tickFor(`${OTHER}/only.ts`));
   assert.deepEqual(lastReported(), [`${OTHER}/only.ts`]);
@@ -326,4 +328,132 @@ test("the open-file button on a row still opens the file, not the tick", async (
   fireEvent.click(rowFor(C).querySelector(".git-change-open-action"));
   assert.deepEqual(opened, [C]);
   assert.deepEqual(lastReported(), [], "opening a file must not tick it");
+});
+// ---------------------------------------------------------------------------
+// The commit message box and the streamed operation output.
+//
+// The buttons live in RightPanel's toolbar (components/RightPanel.test.mjs) and
+// the state lives in useGitActions (hooks/useGitActions.test.mjs). What is left
+// for this file is the surface between them: that the message box is here and
+// reports upward, and that an operation's output is shown without taking the
+// panel's working surface away — a push can take a minute, and a minute of
+// nothing but a spinner is not progress.
+/** An operation as the hook hands one over. */
+function operation(props = {}) {
+  return { kind: "push", log: "", running: false, outcome: null, ...props };
+}
+
+test("the message box is labelled and reports what is typed", async () => {
+  const typed = [];
+  await renderSettled({ commitMessage: "", onCommitMessageChange: (value) => typed.push(value) });
+  const box = screen.getByRole("textbox", { name: translate("gitChanges.commitMessage") });
+  fireEvent.change(box, { target: { value: "fix the thing" } });
+  assert.deepEqual(typed, ["fix the thing"]);
+});
+
+test("the message box shows the message it was given, so it is a controlled field", async () => {
+  await renderSettled({ commitMessage: "half typed" });
+  const box = screen.getByRole("textbox", { name: translate("gitChanges.commitMessage") });
+  assert.equal(box.value, "half typed");
+});
+
+test("a running operation reports what it is doing, and offers a cancel", async () => {
+  await renderSettled({ operation: operation({ running: true }), canCancelOperation: true });
+  const status = screen.getByRole("status");
+  assert.equal(status.textContent, translate("gitChanges.operationRunning", { action: translate("gitChanges.push") }));
+  const cancel = screen.getByRole("button", { name: translate("gitChanges.cancelOperation") });
+  assert.equal(cancel.disabled, false);
+});
+
+test("clicking cancel asks the operation to stop, and the hook owns whether it can", async () => {
+  let asked = 0;
+  await renderSettled({
+    operation: operation({ running: true }),
+    canCancelOperation: true,
+    onCancelOperation() { asked += 1; },
+  });
+  fireEvent.click(screen.getByRole("button", { name: translate("gitChanges.cancelOperation") }));
+  assert.equal(asked, 1);
+});
+
+test("a cancel already asked for says so, so it cannot be asked twice", async () => {
+  // `canCancelOperation` is the hook's single answer to "is it still worth asking",
+  // so the button disappearing and the button being disabled are the same fact.
+  await renderSettled({ operation: operation({ running: true }), canCancelOperation: false });
+  assert.equal(screen.queryByRole("button", { name: translate("gitChanges.cancelOperation") }), null);
+  const asked = screen.getByRole("button", { name: translate("gitChanges.operationCancelling") });
+  assert.equal(asked.disabled, true, "the control stays put, but says the ask is already in flight");
+});
+
+test("a commit is never offered a cancel, because nothing is running to stop", async () => {
+  await renderSettled({
+    operation: operation({ kind: "commit", running: true }),
+    canCancelOperation: true,
+  });
+  assert.equal(screen.queryByRole("button", { name: translate("gitChanges.cancelOperation") }), null);
+  assert.equal(screen.getByRole("status").textContent, translate("gitChanges.operationRunning", { action: translate("gitChanges.commit") }));
+});
+
+test("a rejected push shows the remote's message, not a success", async () => {
+  await renderSettled({
+    operation: operation({
+      log: "To /repo.git\n ! [rejected]        main -> main (fetch first)\n",
+      outcome: { kind: "error", message: translate("errors.git_write_failed") },
+    }),
+  });
+  assert.equal(screen.getByRole("status").textContent, translate("errors.git_write_failed"));
+  const log = document.querySelector(".git-operation-log");
+  assert.match(log.textContent, /fetch first/, "the remote's own words have to be on screen");
+  assert.doesNotMatch(screen.getByRole("status").textContent, /finished/);
+});
+
+test("a settled operation says how it ended, in the operation's own words", async () => {
+  for (const [outcome, key] of [
+    [{ kind: "done" }, "gitChanges.operationDone"],
+    [{ kind: "cancelled" }, "gitChanges.operationCancelled"],
+  ]) {
+    cleanup();
+    await renderSettled({ operation: operation({ outcome }) });
+    assert.equal(
+      screen.getByRole("status").textContent,
+      translate(key, { action: translate("gitChanges.push") }),
+      key,
+    );
+  }
+});
+
+test("an operation's output is a bounded region, not a replacement for the diff", async () => {
+  // The plan's "do not block the panel": a push can take a minute, so the file
+  // list, the ticks and the diff all have to keep working while it does.
+  await renderSettled({
+    operation: operation({ running: true, log: "Counting objects: 42%\n" }),
+    canCancelOperation: true,
+  });
+  assert.ok(document.querySelector(".git-operation-log"));
+  assert.match(document.querySelector(".git-operation-log").textContent, /Counting objects/);
+  assert.equal(screen.getAllByRole("option").length, 3, "the file list is still there");
+  fireEvent.click(tickFor(B));
+  assert.deepEqual(lastReported(), [B], "and the ticks still work");
+  assert.equal(screen.getAllByRole("option").length, 3);
+  assert.ok(document.querySelector(".diff-view, pre, [class*='diff']"), "the diff pane is still rendered");
+});
+
+test("git's output is a named, focusable log region, not an unlabelled pre", async () => {
+  // A scrollable region that cannot be focused cannot be scrolled from the
+  // keyboard, and a label on an element with no role is not exposed at all.
+  await renderSettled({ operation: operation({ log: "Counting objects: 100%\n" }) });
+  const log = screen.getByRole("log", { name: translate("gitChanges.gitOutput") });
+  assert.match(log.textContent, /Counting objects/);
+  assert.equal(log.tabIndex, 0);
+});
+
+test("no output yet means no log region, so the panel is not carrying an empty box", async () => {
+  await renderSettled({ operation: operation({ running: true }), canCancelOperation: true });
+  assert.equal(document.querySelector(".git-operation-log"), null);
+});
+
+test("nothing has run, so there is no operation surface at all", async () => {
+  await renderSettled();
+  assert.equal(screen.queryByRole("status"), null);
+  assert.equal(document.querySelector(".git-operation"), null);
 });

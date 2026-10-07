@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useState, type RefObject } from "react";
+import { memo, useEffect, useState, type ReactNode, type RefObject } from "react";
 import {
   AtSign,
   ChevronsDownUp,
@@ -9,6 +9,7 @@ import {
   Files,
   Folder,
   GitBranch,
+  GitCommitHorizontal,
   LocateFixed,
   RefreshCw,
   Search,
@@ -18,6 +19,7 @@ import {
 import { TabBar, type Tab } from "./TabBar";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { GitChangesPanel } from "./GitChangesPanel";
+import { GitActionsProvider, useGitActionsContext } from "./GitActionsProvider";
 import { TerminalPanel } from "./TerminalPanel";
 import { FileViewer } from "./FileViewer";
 import { useI18n } from "@/lib/i18n";
@@ -162,6 +164,16 @@ export const RightPanel = memo(function RightPanel({
           onBlur={(e) => { e.currentTarget.style.background = "transparent"; }}
         />
       )}
+      {/* The Git tab's write surface, wrapped AROUND the panel rather than held in
+          it. The three buttons are in the toolbar and the message box and the
+          output are in the tabpanel, and only a provider can share state between
+          those two places without re-rendering this whole subtree on every
+          keystroke — the memo boundary on this component exists to avoid exactly
+          that (see components/GitActionsProvider.tsx).
+          `onExplorerRefresh` is the post-change callback, not a decoration: a commit
+          or a pull moves HEAD, and without it the changed-file list would keep
+          listing files this panel just wrote. */}
+      <GitActionsProvider cwd={explorerCwd} onChanged={onExplorerRefresh}>
       {/* Right panel: file viewer — always mounted, width animated via CSS */}
       <aside
         id="workspace-file-panel"
@@ -261,6 +273,7 @@ export const RightPanel = memo(function RightPanel({
               >
                 <RefreshCw size={13} strokeWidth={2} aria-hidden="true" className={explorerRefreshing ? "icon-spin" : undefined} />
               </button>
+              <GitActionButtons isMobile={isMobile} />
             </div>
             )
           ) : rightView === "file" && activeFileTab && (
@@ -403,7 +416,7 @@ export const RightPanel = memo(function RightPanel({
         {/* Git changes tab view — kept mounted so selection survives tab switches. */}
         <div id="workspace-file-panel-git" role="tabpanel" aria-label={t("tabBar.git")} style={{ display: rightView === "git" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
           {visitedViews.has("git") && (explorerCwd ? (
-            <GitChangesPanel
+            <GitChangesForCwd
               cwd={explorerCwd}
               refreshKey={explorerRefreshKey}
               onOpenFile={onOpenFile}
@@ -455,6 +468,75 @@ export const RightPanel = memo(function RightPanel({
           )}
         </div>
       </aside>
+      </GitActionsProvider>
     </>
   );
 });
+
+/**
+ * Commit, push and pull, in the Git tab's toolbar next to the refresh.
+ *
+ * Separate from `RightPanel` on purpose: it is one of the two consumers of the
+ * write surface, so the state that changes while a commit message is typed
+ * re-renders this and the panel's message box — and nothing else in the tree.
+ */
+function GitActionButtons({ isMobile }: { isMobile: boolean }) {
+  const { t } = useI18n();
+  const git = useGitActionsContext();
+  if (!git) return null;
+
+  const action = (label: string, className: string, onClick: () => void, icon: ReactNode, enabled: boolean): ReactNode => (
+    <button
+      className={className}
+      aria-label={label}
+      onClick={onClick}
+      // A disabled control is the honest signal, and for Commit it is what stops
+      // an empty commit: nothing ticked, or nothing typed, means there is no
+      // commit to make.
+      disabled={!enabled}
+      title={label}
+      style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, width: isMobile ? "auto" : 26, height: 26, padding: isMobile ? "0 8px" : 0, background: "none", border: "none", borderRadius: "var(--radius-control)", color: "var(--text-muted)", cursor: enabled ? "pointer" : "default", opacity: enabled ? 1 : 0.6, fontSize: 11, fontWeight: 600, whiteSpace: "nowrap" }}
+      onMouseEnter={(e) => { if (!enabled) return; e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+      onMouseLeave={(e) => { if (!enabled) return; e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "none"; }}
+    >
+      <span style={{ display: "flex", flexShrink: 0 }}>{icon}</span>
+      {isMobile && <span>{label}</span>}
+    </button>
+  );
+
+  return (
+    <>
+      {/* Push and pull need no selection, so the only thing that can disable them is
+          another operation in flight. Deliberately NOT tied to `explorerIsRepo`:
+          that flag describes the EXPLORER's view of the directory, can be absent or
+          stale, and a stale flag would disable a working button. The write layer
+          refuses a directory that is not a repository, with a message. */}
+      {action(t("gitChanges.commit"), "git-commit", git.commit, <GitCommitHorizontal size={13} strokeWidth={2} aria-hidden="true" />, git.canCommit)}
+      {action(t("gitChanges.push"), "git-push", git.push, <Upload size={13} strokeWidth={2} aria-hidden="true" />, !git.busy)}
+      {action(t("gitChanges.pull"), "git-pull", git.pull, <Download size={13} strokeWidth={2} aria-hidden="true" />, !git.busy)}
+    </>
+  );
+}
+
+/** The Git tab, reading the write surface off the provider. */
+function GitChangesForCwd(props: {
+  cwd: string;
+  refreshKey: number;
+  onOpenFile: (filePath: string, fileName: string) => void;
+  onAtMention: (relativePath: string, isDir: boolean) => void;
+  onRefreshDone: () => void;
+}) {
+  const git = useGitActionsContext();
+  if (!git) return null;
+  return (
+    <GitChangesPanel
+      {...props}
+      onTickedPathsChange={git.setTickedPaths}
+      commitMessage={git.commitMessage}
+      onCommitMessageChange={git.setCommitMessage}
+      operation={git.operation}
+      canCancelOperation={git.canCancel}
+      onCancelOperation={git.cancel}
+    />
+  );
+}
