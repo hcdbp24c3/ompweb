@@ -24,6 +24,7 @@ const SkillsConfig = dynamic(() => import("./SkillsConfig").then((module) => mod
 const PluginsConfig = dynamic(() => import("./PluginsConfig").then((module) => module.PluginsConfig), { loading: SettingsTabLoading, ssr: false });
 const McpConfig = dynamic(() => import("./McpConfig").then((module) => module.McpConfig), { loading: SettingsTabLoading, ssr: false });
 const GitCredentialsConfig = dynamic(() => import("./GitCredentialsConfig").then((module) => module.GitCredentialsConfig), { loading: SettingsTabLoading, ssr: false });
+const WebSearchConfig = dynamic(() => import("./WebSearchConfig").then((module) => module.WebSearchConfig), { loading: SettingsTabLoading, ssr: false });
 const AgentsConfig = dynamic(() => import("./AgentsConfig").then((module) => module.AgentsConfig), { loading: SettingsTabLoading, ssr: false });
 const UsageConfig = dynamic(() => import("./UsageConfig").then((module) => module.UsageConfig), { loading: SettingsTabLoading, ssr: false });
 
@@ -1165,6 +1166,10 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsTabs.providers.description")}</p>
                 </div>
                 <ModelsConfig embedded onClose={onClose} onSaved={onModelsSaved} />
+                {/* Web-search credentials are global, like git credentials: they are
+                    keyed by backend, not by workspace, so they live in this panel
+                    rather than one that needs a cwd. */}
+                <WebSearchConfig />
               </div>
             )}
 
