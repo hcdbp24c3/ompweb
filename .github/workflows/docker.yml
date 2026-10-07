@@ -90,6 +90,10 @@ jobs:
             OMP_VERSION=${{ vars.OMP_VERSION || 'latest' }}
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+          # Re-run only the omp install layer (see the marker in the Dockerfile).
+          # Without this, `OMP_VERSION=latest` is not actually latest: the import
+          # below returns a cached layer and the image keeps an old omp forever.
+          no-cache-filter: omp-install-cache-bust
 
   # Assemble one multi-arch manifest from the two per-arch tags.
   merge:

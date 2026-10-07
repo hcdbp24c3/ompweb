@@ -104,6 +104,14 @@ RUN apt-get update \
 # ~/.local/bin regardless, which is why the app would still start without this.)
 ENV PATH="/root/.local/bin:${PATH}"
 ARG OMP_VERSION=latest
+# omp-install-cache-bust
+#
+# `curl | sh` with a fixed instruction is a CACHEABLE layer: Docker (and the GHA
+# cache the workflow imports) reuses it forever, so an `OMP_VERSION=latest`
+# image kept shipping whatever omp happened to be installed the first time this
+# line was ever built. The label above is what `no-cache-filter` matches on, so
+# ONLY this RUN re-executes on every build and every other layer stays cached.
+# Nothing else in the file may contain this string.
 RUN if [ "${OMP_VERSION}" != "latest" ]; then \
         curl -fsSL https://omp.sh/install | sh -s -- --binary --ref "v${OMP_VERSION}"; \
     else \
