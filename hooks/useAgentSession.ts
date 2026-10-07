@@ -430,6 +430,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       scope: () => hookAliveRef.current ? `${sessionIdRef.current}:${promptRunIdRef.current}:${contextRequestSeqRef.current}` : null,
       metadataVersion: () => authoritativeModelSeqRef.current,
       history: (context, leafId, metadata) => {
+        // `context` is required here, and every in-repo caller passes one. But the
+        // route may legitimately omit it — a transcript longer than one history
+        // page arrives with no body — so a caller that ever forgets to seed first
+        // must fail with a name somebody can grep for, not a TypeError that reads
+        // like a null dereference somewhere else entirely.
+        if (!context) {
+          throw new Error(
+            `session history callback received no context (leafId=${String(leafId)}); ` +
+            "a session longer than one page must be seeded from /context?sync=1&tail=1 before publishing",
+          );
+        }
         setMessages(context.messages);
         setEntryIds(context.entryIds);
         setHistoryWindow((previous) => {
@@ -1512,7 +1523,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const state = loaded.agentState?.state;
         stillBusy = !!(state?.isStreaming || state?.isPromptRunning || state?.isCompacting);
         if (!promptDispatchPendingRef.current && state?.responseObserved) hadContent = true;
-        const { messages, entryIds = [] } = loaded.context;
+        // `entryIds = []` guards a missing field, not a missing object: a
+        // session longer than one page can arrive with no context at all.
+        const { messages, entryIds = [] } = loaded.context ?? { messages: [] };
         // Only the latest user turn can answer the current prompt. Entry ids
         // distinguish repeated same-text prompts from the previous saved turn.
         const userIndex = messages.findLastIndex((message) => message.role === "user");
