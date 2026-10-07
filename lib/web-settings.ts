@@ -7,9 +7,17 @@ import { isRecord } from "./type-guards";
 export interface WebServerSettings {
   /** Resume sessions that were mid-run when omp-web stopped. */
   autoResumeSessions: boolean;
+  /**
+   * Let omp-web run `omp update` on its own, on a timer, without being asked.
+   *
+   * Off by default, deliberately: installing a new runtime under a running
+   * server is not something to enable by surprise. It also stays behind the
+   * existing `OMP_WEB_DISABLE_AUTOUPDATE` guard, so that env var still wins.
+   */
+  autoUpdateOmp: boolean;
 }
 
-const DEFAULTS: WebServerSettings = { autoResumeSessions: false };
+const DEFAULTS: WebServerSettings = { autoResumeSessions: false, autoUpdateOmp: false };
 
 function settingsPath(): string {
   return resolve(getAgentDir(), "omp-web-settings.json");
@@ -28,7 +36,10 @@ export function loadWebServerSettings(): WebServerSettings {
   try {
     if (existsSync(path)) {
       const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
-      if (isRecord(raw)) settings = { autoResumeSessions: raw.autoResumeSessions === true };
+      if (isRecord(raw)) settings = {
+      autoResumeSessions: raw.autoResumeSessions === true,
+      autoUpdateOmp: raw.autoUpdateOmp === true,
+    };
     }
   } catch {
     // Unreadable settings fall back to the defaults.

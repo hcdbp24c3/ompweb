@@ -45,6 +45,22 @@ export async function register(): Promise<void> {
     }
   })();
 
+  // Opt-in omp runtime updater. Started here, not from the browser, so it runs
+  // whether or not a client is connected — a page timer would make "auto
+  // update" mean "updates when the tab happens to be open". Fire-and-forget,
+  // and gated on the setting so the default boot path is unchanged.
+  void (async () => {
+    try {
+      const { loadWebServerSettings } = await import("@/lib/web-settings");
+      if (!loadWebServerSettings().autoUpdateOmp) return;
+      const { startOmpAutoUpdate } = await import("@/lib/omp/auto-update");
+      const started = startOmpAutoUpdate();
+      if (started.started) console.log("[omp-web] omp auto-update enabled");
+    } catch (error) {
+      console.warn(`[omp-web] omp auto-update could not start: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  })();
+
   // Resume sessions that were mid-run when omp-web last stopped (opt-in
   // setting). Fire-and-forget: resuming must not block boot.
   void (async () => {
