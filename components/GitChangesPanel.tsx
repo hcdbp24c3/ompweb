@@ -14,6 +14,7 @@ import {
 } from "@/lib/file-paths";
 import { pruneTickedPaths, toggleTickedPath } from "@/lib/git-file-selection";
 import type { GitFileDiffResponse, GitStatusResponse } from "@/lib/git-types";
+import type { GitOperation, GitOperationKind } from "@/hooks/useGitActions";
 
 interface Props {
   cwd: string;
@@ -24,11 +25,29 @@ interface Props {
   /** The ticked paths, absolute and exactly as ticked. The commit surface lives
    *  outside this panel, so the set is owned here and reported out. */
   onTickedPathsChange?: (paths: string[]) => void;
+  /** The message the toolbar's Commit button will send. Owned by the hook
+   *  because the button that consumes it is in RightPanel's toolbar, not here. */
+  commitMessage: string;
+  onCommitMessageChange: (message: string) => void;
+  /** The newest write operation, or null if none has run. Its output is shown
+   *  here rather than in the toolbar, so the buttons stay where the user left
+   *  them and the log has room to grow. */
+  operation: GitOperation | null;
+  /** Whether asking the server to stop is still worth doing. The hook's single
+   *  answer, so the button's state and its guard cannot disagree. */
+  canCancelOperation: boolean;
+  onCancelOperation: () => void;
 }
 
 /** Identity-stable "nothing ticked", so an empty selection is not a new object
  *  on every render. */
 const NO_TICKED_PATHS: ReadonlySet<string> = new Set<string>();
+
+const OPERATION_LABEL_KEYS: Record<GitOperationKind, string> = {
+  commit: "gitChanges.commit",
+  push: "gitChanges.push",
+  pull: "gitChanges.pull",
+};
 
 async function fetchStatus(cwd: string): Promise<GitStatusResponse> {
   const params = new URLSearchParams({ cwd });
@@ -48,7 +67,137 @@ async function fetchPatch(cwd: string, filePath: string): Promise<GitFileDiffRes
   return res.json() as Promise<GitFileDiffResponse>;
 }
 
-export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRefreshDone, onTickedPathsChange }: Props) {
+/**
+ * What the write surface reports back, below the working surface rather than
+ * replacing it: a push can take a minute, and a minute of a panel that will not
+ * scroll is a minute of not knowing. The log is bounded so the diff above it
+ * keeps its room.
+ *
+ * The headline never decides the outcome. While the operation runs there is no
+ * outcome, and once it ends the hook's verdict is the only thing allowed to say
+ * what happened — a heading that read "finished" for a push the remote rejected
+ * is the single failure this whole surface exists to prevent. The verdict's own
+ * message is shown verbatim, and for a failure that happened after git ran it is
+ * git's own wording, with the full output right under it.
+ */
+function GitOperationStrip({
+  operation,
+  canCancel,
+  onCancel,
+}: {
+  operation: GitOperation;
+  canCancel: boolean;
+  onCancel: () => void;
+}) {
+  const { t } = useI18n();
+  const action = t(OPERATION_LABEL_KEYS[operation.kind]);
+  const status = operation.running
+    ? t("gitChanges.operationRunning", { action })
+    : operation.outcome
+      ? operation.outcome.kind === "done"
+        ? t("gitChanges.operationDone", { action })
+        : operation.outcome.kind === "cancelled"
+          ? t("gitChanges.operationCancelled", { action })
+          : operation.outcome.message
+      // A finished operation with no verdict is a state the hook does not produce;
+      // if one ever appears it is an unknown outcome, which is not a success.
+      : t("gitChanges.operationInterrupted");
+  // A commit answers with JSON in one round trip, so there is no child to stop and
+  // no id for DELETE to name: offering the control would be a lie.
+  const cancellable = operation.running && operation.kind !== "commit";
+
+  return (
+    <div
+      className="git-operation"
+      style={{ flexShrink: 0, borderTop: "1px solid var(--border)", background: "var(--bg-panel)" }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 8px", minWidth: 0 }}>
+        <span
+          role="status"
+          className="git-operation-status"
+          style={{
+            flex: 1,
+            minWidth: 0,
+            fontSize: 11,
+            fontWeight: 600,
+            color: operation.outcome?.kind === "error" ? "var(--status-error)" : "var(--text-muted)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+          title={status}
+        >
+          {status}
+        </span>
+        {cancellable && (
+          <button
+            className="git-operation-cancel"
+            type="button"
+            onClick={onCancel}
+            disabled={!canCancel}
+            title={canCancel ? t("gitChanges.cancelOperation") : t("gitChanges.operationCancelling")}
+            style={{
+              flexShrink: 0,
+              height: 22,
+              padding: "0 8px",
+              background: "var(--bg)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-control)",
+              color: canCancel ? "var(--text)" : "var(--text-dim)",
+              cursor: canCancel ? "pointer" : "default",
+              opacity: canCancel ? 1 : 0.7,
+              fontSize: 11,
+              fontWeight: 600,
+              whiteSpace: "nowrap",
+            }}
+          >
+            {canCancel ? t("gitChanges.cancelOperation") : t("gitChanges.operationCancelling")}
+          </button>
+        )}
+      </div>
+      {operation.log && (
+        // `role="log"` rather than a bare <pre>: the label is only exposed if the
+        // element has a role, and it is the right one — a region that receives
+        // streamed output. `tabIndex` because the region scrolls and a scrollable
+        // region that cannot be focused cannot be scrolled from the keyboard.
+        <pre
+          className="git-operation-log"
+          role="log"
+          tabIndex={0}
+          aria-label={t("gitChanges.gitOutput")}
+          style={{
+            margin: 0,
+            padding: "4px 8px 6px",
+            maxHeight: 96,
+            overflow: "auto",
+            fontFamily: "var(--font-mono)",
+            fontSize: 10,
+            lineHeight: 1.5,
+            color: "var(--text-dim)",
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+          }}
+        >
+          {operation.log}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+export function GitChangesPanel({
+  cwd,
+  refreshKey,
+  onOpenFile,
+  onAtMention,
+  onRefreshDone,
+  onTickedPathsChange,
+  commitMessage,
+  onCommitMessageChange,
+  operation,
+  canCancelOperation,
+  onCancelOperation,
+}: Props) {
   const { t, tn } = useI18n();
   const [files, setFiles] = useState<GitStatusResponse["files"]>([]);
   const [isRepo, setIsRepo] = useState(false);
@@ -571,6 +720,55 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
             )}
           </div>
         </>
+      )}
+
+      {/* The commit message box. It sits with the changed files rather than in the
+          toolbar because that is what it describes, and because a message box in
+          a 26px toolbar row would be unreadable. The button that consumes it is
+          in the toolbar above; its disabled state is the honest signal that this
+          box needs more than it has. */}
+      {isRepo && !loading && !error && (
+        <div className="git-commit-box" style={{ flexShrink: 0, padding: "6px 8px", borderTop: "1px solid var(--border)" }}>
+          <textarea
+            className="git-commit-message"
+            value={commitMessage}
+            onChange={(e) => onCommitMessageChange(e.target.value)}
+            rows={2}
+            placeholder={t("gitChanges.commitMessagePlaceholder")}
+            aria-label={t("gitChanges.commitMessage")}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") e.stopPropagation();
+            }}
+            style={{
+              display: "block",
+              width: "100%",
+              boxSizing: "border-box",
+              minHeight: 46,
+              maxHeight: 140,
+              padding: "5px 7px",
+              background: "var(--bg)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-control)",
+              outline: "none",
+              color: "var(--text)",
+              fontSize: 12,
+              lineHeight: 1.5,
+              fontFamily: "inherit",
+              resize: "vertical",
+            }}
+            onFocus={(e) => { e.currentTarget.style.borderColor = "var(--accent)"; }}
+            onBlur={(e) => { e.currentTarget.style.borderColor = "var(--border)"; }}
+          />
+        </div>
+      )}
+
+      {/* git's real output, streamed. */}
+      {operation && (
+        <GitOperationStrip
+          operation={operation}
+          canCancel={canCancelOperation}
+          onCancel={onCancelOperation}
+        />
       )}
     </div>
   );

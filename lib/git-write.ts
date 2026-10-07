@@ -8,6 +8,7 @@ import {
 } from "./git-credential-resolve";
 import { loadGitCredentials } from "./git-credentials";
 import { gitIdentityEnvForSpawn } from "./git-identity";
+import type { GitWriteAction } from "./git-types";
 import { hostChildEnv } from "./project-command-env";
 
 const execFileAsync = promisify(execFile);
@@ -56,8 +57,6 @@ const execFileAsync = promisify(execFile);
 // ordinary remote of all — a local path or a file:// one — which is exactly what
 // the verification path uses.
 // ============================================================================
-
-export type GitWriteAction = "stage" | "commit" | "push" | "pull";
 
 /** A failure a client can localize: `formatApiError` looks up `errors.<code>`. */
 export class GitWriteError extends Error {
