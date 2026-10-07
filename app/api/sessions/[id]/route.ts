@@ -24,6 +24,7 @@ import {
   readSessionHeader,
   SessionFileTooLargeError,
 } from "@/lib/session-reader";
+import { readNativeSettings } from "@/lib/omp/settings-config";
 import { MAX_SYNC_MESSAGES } from "@/lib/session-sync";
 import { resolveSessionPathOr404 } from "@/lib/api-utils";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
@@ -204,7 +205,13 @@ export async function GET(
     const displayEntries = await getSessionEntriesForDisplayAsync(filePath, { skipToolResultImages: deferToolResultImages });
     const leafId = getLeafEntryId(displayEntries);
     const tree = projectTreeForResponse(buildSessionTree(displayEntries));
-    const context = buildSessionContext(displayEntries, leafId, { deferThinking, deferToolResultImages });
+    const context = buildSessionContext(displayEntries, leafId, {
+      deferThinking,
+      deferToolResultImages,
+      // omp's own default, so a session that was never switched does not
+      // report "off" while config.yml says `defaultThinkingLevel: auto`.
+      defaultThinkingLevel: readNativeSettings().settings.defaultThinkingLevel,
+    });
 
     let modified = header.timestamp ?? new Date().toISOString();
     try { modified = statSync(filePath).mtime.toISOString(); } catch { /* use header timestamp */ }

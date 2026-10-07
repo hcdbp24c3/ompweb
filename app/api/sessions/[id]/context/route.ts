@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { existsSync } from "fs";
 import { loadSessionFile } from "@/lib/omp/session-files";
 import { buildSessionContext, getSessionContextBoundary, getSessionEntriesForDisplayAsync, getSessionHistoryPage, readSessionHeader, SessionFileTooLargeError } from "@/lib/session-reader";
+import { readNativeSettings } from "@/lib/omp/settings-config";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { MAX_SYNC_MESSAGES, parseHistoryCursor, selectSessionHistory, type SessionHistoryCursor, type SessionSyncResponse } from "@/lib/session-sync";
@@ -121,6 +122,7 @@ export async function GET(
     // Deduplicated cached read; blob resolution on per-entry deep copies.
     const entries = await getSessionEntriesForDisplayAsync(filePath, { skipToolResultImages: deferToolResultImages });
     const context = buildSessionContext(entries, leafId, {
+      defaultThinkingLevel: readNativeSettings().settings.defaultThinkingLevel,
       deferThinking,
       deferToolResultImages,
       includePreCompaction,

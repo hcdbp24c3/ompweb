@@ -825,7 +825,22 @@ const SUPERSEDED_COMPACTION_SUMMARY = "[Superseded compaction summary elided aft
 export function buildSessionContext(
   entries: SessionEntry[],
   leafId?: string | null,
-  options: { deferThinking?: boolean; deferToolResultImages?: boolean; includePreCompaction?: boolean } = {},
+  options: {
+    deferThinking?: boolean;
+    deferToolResultImages?: boolean;
+    includePreCompaction?: boolean;
+    /**
+     * omp's own `defaultThinkingLevel` from config.yml.
+     *
+     * A session only carries a `thinking_level_change` entry once the user has
+     * CHANGED the level in it. Without this, a session that has never been
+     * touched reported "off" while the user's global default was `auto` — so
+     * opening a session silently contradicted the setting they had configured.
+     * The default stays "off" for the empty-context calls that only page
+     * history, where the field is unused.
+     */
+    defaultThinkingLevel?: string;
+  } = {},
 ): SessionContext {
   const { selected, compactionId, ...metadata } = selectSessionContext(entries, leafId, options);
   return {
@@ -841,9 +856,12 @@ export function buildSessionContext(
 function selectSessionContext(
   entries: SessionEntry[],
   leafId?: string | null,
-  options: { includePreCompaction?: boolean } = {},
+  options: { includePreCompaction?: boolean; defaultThinkingLevel?: string } = {},
 ) {
-  const empty = { selected: [] as SessionEntry[], compactionId: null as string | null, thinkingLevel: "off", model: null as SessionContext["model"], todoPhases: [] as TodoPhase[] };
+  // Same reasoning as buildSessionContext's option: a session with no
+  // thinking_level_change entry must report omp's configured default, not a
+  // hardcoded "off" that silently contradicts it.
+  const empty = { selected: [] as SessionEntry[], compactionId: null as string | null, thinkingLevel: options.defaultThinkingLevel ?? "off", model: null as SessionContext["model"], todoPhases: [] as TodoPhase[] };
   const byId = new Map<string, SessionEntry>();
   for (const e of entries) byId.set(e.id, e);
   if (leafId === null) return empty;
@@ -861,7 +879,7 @@ function selectSessionContext(
   }
   path.reverse();
 
-  let thinkingLevel = "off";
+  let thinkingLevel = options.defaultThinkingLevel ?? "off";
   const models: Record<string, string> = {};
   // Explicit defaults take precedence over temporary assistant fallbacks.
   let hasExplicitDefaultModel = false;
