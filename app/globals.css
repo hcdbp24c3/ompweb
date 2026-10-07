@@ -4245,6 +4245,7 @@ html[data-touch-targets="accessible"] :is(
   .git-clear-filter,
   .git-refresh,
   .git-change-open-action,
+  .git-change-tick,
   .git-change-mention-action,
   .git-change-footer-open,
   .file-explorer-search-input,

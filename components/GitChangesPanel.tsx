@@ -12,6 +12,7 @@ import {
   getRelativeFilePath,
   normalizeFilePathSlashes,
 } from "@/lib/file-paths";
+import { pruneTickedPaths, toggleTickedPath } from "@/lib/git-file-selection";
 import type { GitFileDiffResponse, GitStatusResponse } from "@/lib/git-types";
 
 interface Props {
@@ -20,7 +21,14 @@ interface Props {
   onOpenFile: (filePath: string, fileName: string) => void;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   onRefreshDone?: () => void;
+  /** The ticked paths, absolute and exactly as ticked. The commit surface lives
+   *  outside this panel, so the set is owned here and reported out. */
+  onTickedPathsChange?: (paths: string[]) => void;
 }
+
+/** Identity-stable "nothing ticked", so an empty selection is not a new object
+ *  on every render. */
+const NO_TICKED_PATHS: ReadonlySet<string> = new Set<string>();
 
 async function fetchStatus(cwd: string): Promise<GitStatusResponse> {
   const params = new URLSearchParams({ cwd });
@@ -40,7 +48,7 @@ async function fetchPatch(cwd: string, filePath: string): Promise<GitFileDiffRes
   return res.json() as Promise<GitFileDiffResponse>;
 }
 
-export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRefreshDone }: Props) {
+export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRefreshDone, onTickedPathsChange }: Props) {
   const { t, tn } = useI18n();
   const [files, setFiles] = useState<GitStatusResponse["files"]>([]);
   const [isRepo, setIsRepo] = useState(false);
@@ -54,6 +62,15 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
   const [patchError, setPatchError] = useState<string | null>(null);
   const [treeRefreshKey, setTreeRefreshKey] = useState(0);
   const [hoveredPath, setHoveredPath] = useState<string | null>(null);
+  // The ticked paths, tagged with the cwd they were ticked in. A tick is only
+  // meaningful for the directory it was made in — the paths are absolute, so no
+  // path can survive into another repo — and reading the set only while the tag
+  // still matches means a cwd switch hides them on the very next render, with no
+  // window in which a stale path could still be sent to a commit.
+  const [ticked, setTicked] = useState<{ cwd: string; paths: ReadonlySet<string> }>(
+    () => ({ cwd, paths: NO_TICKED_PATHS }),
+  );
+  const tickedPaths = ticked.cwd === cwd ? ticked.paths : NO_TICKED_PATHS;
   const filterInputRef = useRef<HTMLInputElement>(null);
   const patchRequestRef = useRef(0);
   const refreshToken = `${refreshKey ?? 0}:${treeRefreshKey}`;
@@ -62,6 +79,23 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
   // the fetch effect below (AppShell re-renders on every session boundary).
   const onRefreshDoneRef = useRef(onRefreshDone);
   onRefreshDoneRef.current = onRefreshDone;
+
+  // Same reason: the selection is reported, not consumed, so a new closure each
+  // render must not re-report an unchanged set.
+  const onTickedPathsChangeRef = useRef(onTickedPathsChange);
+  onTickedPathsChangeRef.current = onTickedPathsChange;
+
+  useEffect(() => {
+    onTickedPathsChangeRef.current?.([...tickedPaths]);
+  }, [tickedPaths, cwd]);
+
+  // `tickedPaths` rather than the raw state: the cwd rule lives in the derivation
+  // above, so the handler inherits it instead of restating it. (A tick can only
+  // be made while rows are rendered, and rows are unmounted for the whole of a
+  // status fetch, so a second copy of the rule here would be unreachable.)
+  const toggleTick = useCallback((filePath: string) => {
+    setTicked({ cwd, paths: toggleTickedPath(tickedPaths, filePath) });
+  }, [cwd, tickedPaths]);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,6 +107,13 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
         const nextFiles = status.isGitRepository ? status.files : [];
         setFiles(nextFiles);
         setIsRepo(status.isGitRepository);
+        // A tick on a file this refresh no longer lists is dropped: the row is
+        // gone, so committing it would send a path git does not consider
+        // modified any more.
+        setTicked((prev) => ({
+          cwd,
+          paths: pruneTickedPaths(prev.cwd === cwd ? prev.paths : NO_TICKED_PATHS, nextFiles),
+        }));
         // Keep the selection when it still exists; otherwise preview the first
         // changed file so the diff pane is never blank behind a file list.
         setSelectedPath((prev) =>
@@ -86,6 +127,7 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
         setFiles([]);
         setIsRepo(false);
         setSelectedPath(null);
+        setTicked({ cwd, paths: NO_TICKED_PATHS });
         setError(e instanceof Error ? e.message : String(e));
       })
       .finally(() => {
@@ -250,8 +292,22 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
         </div>
       ) : (
         <>
-          <div style={{ padding: "0 12px 4px", fontSize: 10, color: "var(--text-dim)", flexShrink: 0 }}>
-            {tn("gitChanges.filesChanged", files.length)}
+          <div
+            style={{
+              padding: "0 12px 4px",
+              fontSize: 10,
+              color: "var(--text-dim)",
+              flexShrink: 0,
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            <span>{tn("gitChanges.filesChanged", files.length)}</span>
+            {tickedPaths.size > 0 && <span aria-hidden="true">·</span>}
+            <span className="git-change-ticked-count">
+              {tickedPaths.size > 0 ? tn("gitChanges.tickedCount", tickedPaths.size) : ""}
+            </span>
           </div>
           <div role="listbox" aria-label={t("tabBar.git")} style={{ flex: "0 1 auto", maxHeight: "38%", minHeight: 60, overflowY: "auto", overflowX: "hidden", padding: "0 4px", flexShrink: 1, borderBottom: "1px solid var(--border)" }}>
             {filteredFiles.length === 0 ? (
@@ -262,6 +318,7 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
               const directory = getFileDirectory(relative);
               const isSelected = file.filePath === selectedPath;
               const isHovered = file.filePath === hoveredPath;
+              const isTicked = tickedPaths.has(file.filePath);
               return (
                 <div
                   className="git-change-row"
@@ -348,6 +405,36 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
                   >
                     {file.code}
                   </span>
+                    <button
+                      className="git-change-tick"
+                      type="button"
+                      role="checkbox"
+                      aria-checked={isTicked}
+                      aria-label={`${isTicked ? t("gitChanges.untickFile") : t("gitChanges.tickFile")}: ${name}`}
+                      title={isTicked ? t("gitChanges.untickFile") : t("gitChanges.tickFile")}
+                      onClick={(e) => {
+                        // The row click is the diff viewer's selection; a tick must
+                        // never move it.
+                        e.stopPropagation();
+                        toggleTick(file.filePath);
+                      }}
+                      style={{
+                        flexShrink: 0,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        width: 18,
+                        height: 18,
+                        padding: 0,
+                        background: isTicked ? "var(--accent)" : "var(--bg-panel)",
+                        border: `1px solid ${isTicked ? "var(--accent)" : "var(--border)"}`,
+                        borderRadius: "var(--radius-control)",
+                        color: isTicked ? "var(--bg)" : "var(--text-dim)",
+                        cursor: "pointer",
+                      }}
+                    >
+                      {isTicked && <Check size={11} strokeWidth={2.6} aria-hidden="true" />}
+                    </button>
                     <button
                       className="git-change-open-action"
                       type="button"
