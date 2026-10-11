@@ -1,4 +1,5 @@
 "use client";
+import { ProviderSecretField } from "./ModelsConfig-provider-secret";
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -785,6 +786,18 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete, onAddMod
               hideLabel={t("modelsConfig.hideApiKey")}
             />
           </FormField>
+        )}
+
+        {/* The encrypted alternative to the literal field above. Rendered after
+            it, not instead of it: an `apiKey` naming an env var is still a
+            legitimate way to configure a provider, and a user who typed one
+            should not find the box they just used gone. */}
+        {!authIsKeyless(provider.auth) && (
+          <ProviderSecretField
+            providerId={name}
+            envVars={provider.envVars}
+            onChange={(next) => onChange({ ...provider, ...next })}
+          />
         )}
 
         {provider.apiKey && (

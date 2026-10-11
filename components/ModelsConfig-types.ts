@@ -141,6 +141,10 @@ export interface ProviderEntry {
   baseUrl?: string;
   api?: string;
   apiKey?: string;
+  /** Environment variables the credential may arrive in; see `envVars` on
+   *  lib/omp/models-config.ts. omp-web writes the NAME here and keeps the value
+   *  encrypted, so this is not the secret. */
+  envVars?: string[];
   auth?: AuthMode;
   headers?: Record<string, string>;
   discovery?: ProviderDiscovery;
