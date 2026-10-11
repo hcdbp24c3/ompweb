@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getSharedPtyRegistry, TooManyTerminalsError, type TerminalHandle } from "@/lib/terminal/pty-registry";
 import { guardTerminalCwd } from "@/lib/terminal/guard";
 import { ghEnvForSpawn } from "@/lib/gh-env";
-import { loadWebSearchEnv } from "@/lib/api-key-store";
+import { loadOmpSecretEnv } from "@/lib/api-key-store";
 import { gitIdentityEnvForSpawn } from "@/lib/git-identity";
 
 export const dynamic = "force-dynamic";
@@ -44,7 +44,7 @@ export async function GET(request: Request) {
     // commit` typed here is the commit surface this task has to make state, and
     // an unset identity has to show up as an empty environment (git then reports
     // it in its own words) rather than as somebody else's name.
-    handle = registry.attach(cwd, cols, rows, { env: { ...(await ghEnvForSpawn(cwd)), ...(await gitIdentityEnvForSpawn(cwd)), ...loadWebSearchEnv() } });
+    handle = registry.attach(cwd, cols, rows, { env: { ...(await ghEnvForSpawn(cwd)), ...(await gitIdentityEnvForSpawn(cwd)), ...loadOmpSecretEnv() } });
   } catch (error) {
     if (error instanceof TooManyTerminalsError) {
       return NextResponse.json(

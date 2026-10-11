@@ -5,7 +5,7 @@ import { validateAgentImages } from "./image-attachments";
 import { hasVisibleAssistantContent } from "./assistant-response";
 import { invalidateModelsCache } from "./models-cache";
 import { ghEnvForSpawn } from "./gh-env";
-import { loadWebSearchEnv } from "./api-key-store";
+import { loadOmpSecretEnv } from "./api-key-store";
 import { gitIdentityEnvForSpawn } from "./git-identity";
 import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
 import { readNativeSettings } from "./omp/settings-config";
@@ -1145,7 +1145,7 @@ export class AgentSessionWrapper {
         // an agent running `git commit` in this session must author as this
         // repository's identity. Neither may write ~/.gitconfig, so the child
         // environment is the only channel either has.
-        env: { ...(await ghEnvForSpawn(this.cwd)), ...(await gitIdentityEnvForSpawn(this.cwd)), ...loadWebSearchEnv() },
+        env: { ...(await ghEnvForSpawn(this.cwd)), ...(await gitIdentityEnvForSpawn(this.cwd)), ...loadOmpSecretEnv() },
         onExit: (info) => {
           if (this.proc === proc) this.handleProcessExit(info, proc);
         },
@@ -1805,7 +1805,7 @@ export async function startRpcSession(
       // not a failure, so it never throws. The commit identity resolves per-cwd
       // for the same reason: git reads it from the environment, never from a
       // ~/.gitconfig this app must not write.
-      env: { ...(await ghEnvForSpawn(cwd)), ...(await gitIdentityEnvForSpawn(cwd)), ...loadWebSearchEnv() },
+      env: { ...(await ghEnvForSpawn(cwd)), ...(await gitIdentityEnvForSpawn(cwd)), ...loadOmpSecretEnv() },
       onExit: (info) => holder.wrapper?.handleProcessExit(info, proc),
     });
     const created = new AgentSessionWrapper(

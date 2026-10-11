@@ -77,6 +77,13 @@ export interface ModelDefinition {
 export interface ProviderConfig {
   baseUrl?: string;
   apiKey?: string;
+  /**
+   * Environment variables this provider's credential may arrive in. omp's own
+   * catalog ships providers exactly this way (`"envVars":["ZAI_API_KEY"]`) with
+   * no `apiKey` at all, which is how omp-web hands over a key it stores
+   * encrypted instead of writing the secret into models.yml.
+   */
+  envVars?: string[];
   api?: string;
   auth?: "apiKey" | "none" | "oauth";
   headers?: Record<string, string>;
@@ -118,9 +125,15 @@ export function validateModelsConfig(config: ModelsFileConfig): void {
       // provider id — a hand-written `auth: oauth` file loads in omp, so
       // rejecting it here made Settings → Save answer 400 and write nothing.
       const auth = provider.auth ?? "apiKey";
-      if (!provider.apiKey && auth !== "none" && auth !== "oauth") {
+      // A declared envVar satisfies the credential requirement, and this is not
+      // a guess: omp's shipped catalog is full of providers defined only by
+      // `envVars` (`"zai": {"envVars":["ZAI_API_KEY"]}`), so a provider with one
+      // and no `apiKey` is exactly what omp itself accepts.
+      const hasEnvVar = Array.isArray(provider.envVars)
+        && provider.envVars.some((name) => typeof name === "string" && /^[A-Z][A-Z0-9_]*$/.test(name));
+      if (!provider.apiKey && !hasEnvVar && auth !== "none" && auth !== "oauth") {
         throw new Error(
-          `Provider ${providerName}: "apiKey" is required when defining custom models unless auth is "none" or "oauth".`,
+          `Provider ${providerName}: "apiKey" is required when defining custom models unless it declares an envVar, or auth is "none" or "oauth".`,
         );
       }
     } else {

@@ -31,6 +31,8 @@ interface StoredBackend {
 interface WebSearchKeyStore {
   version: 1;
   backends: Record<string, StoredBackend>;
+  /** models.yml provider id -> its env var name -> envelope. */
+  providers: Record<string, StoredBackend>;
 }
 
 export interface WebSearchFieldStatus {
@@ -59,15 +61,15 @@ function readStore(): WebSearchKeyStore {
   try {
     raw = readFileSync(webSearchKeysPath(), "utf8");
   } catch {
-    return { version: 1, backends: {} };
+    return { version: 1, backends: {}, providers: {} };
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return { version: 1, backends: {} };
+    return { version: 1, backends: {}, providers: {} };
   }
-  if (!isRecord(parsed) || !isRecord(parsed.backends)) return { version: 1, backends: {} };
+  if (!isRecord(parsed) || !isRecord(parsed.backends)) return { version: 1, backends: {}, providers: {} };
   const backends: Record<string, StoredBackend> = {};
   for (const [id, value] of Object.entries(parsed.backends)) {
     if (!webSearchBackend(id) || !isRecord(value)) continue;
@@ -77,7 +79,43 @@ function readStore(): WebSearchKeyStore {
     }
     backends[id] = bucket;
   }
-  return { version: 1, backends };
+  const providers: Record<string, StoredBackend> = {};
+  if (isRecord(parsed.providers)) {
+    for (const [id, value] of Object.entries(parsed.providers)) {
+      if (!isRecord(value)) continue;
+      const bucket: StoredBackend = {};
+      for (const [env, envelope] of Object.entries(value)) {
+        if (isEnvVarName(env) && typeof envelope === "string") bucket[env] = envelope;
+      }
+      providers[id] = bucket;
+    }
+  }
+  return { version: 1, backends, providers };
+}
+
+/**
+ * Variables a credential store must never be able to write into a child's
+ * environment, whatever the name looks like.
+ *
+ * `PATH` is the sharp one: it matches every naming rule below, so without this
+ * denylist a hand-edited store entry called `PATH` would shadow the real PATH of
+ * EVERY child process and redirect what `omp` and `git` execute. The rest are
+ * the standard ways an environment variable becomes code execution.
+ */
+const RESERVED_ENV_NAMES: ReadonlySet<string> = new Set([
+  "PATH", "HOME", "SHELL", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
+  "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "NODE_OPTIONS",
+  "NODE_PATH", "BASH_ENV", "ENV", "IFS", "PROMPT_COMMAND", "PS4",
+  "OMP_WEB_OMP_BIN", "OMP_WEB_PASSWORD", "GIT_CONFIG_GLOBAL", "GIT_SSH_COMMAND",
+]);
+
+/** omp env var naming, and the shape hostChildEnv() will actually pass through. */
+export function isEnvVarName(value: string): boolean {
+  if (!/^[A-Z][A-Z0-9_]*$/.test(value)) return false;
+  // hostChildEnv() deletes this whole prefix, so such a value would be stripped
+  // before the child ever saw it — stored, encrypted, delivered, and useless.
+  if (value.startsWith("OMP_WEB_")) return false;
+  return !RESERVED_ENV_NAMES.has(value);
 }
 
 /** Atomic, 0600, temp file + rename — the same discipline as the git store. */
@@ -171,8 +209,7 @@ export function deleteWebSearchBackend(id: string): { path: string } {
  * a key that cannot be read must not stop a session from starting, and omp
  * reports the absence of a search backend far better than omp-web can.
  */
-export function loadWebSearchEnv(): Record<string, string> {
-  const store = readStore();
+function decryptAll(store: WebSearchKeyStore): Record<string, Record<string, string>> {
   const plain: Record<string, Record<string, string>> = {};
   for (const [id, bucket] of Object.entries(store.backends)) {
     const values: Record<string, string> = {};
@@ -182,5 +219,95 @@ export function loadWebSearchEnv(): Record<string, string> {
     }
     plain[id] = values;
   }
-  return webSearchEnv(plain);
+  return plain;
+}
+
+export function loadWebSearchEnv(): Record<string, string> {
+  return webSearchEnv(decryptAll(readStore()));
+}
+
+/**
+ * The decrypted environment for a child process, for BOTH kinds of secret.
+ *
+ * Provider keys are merged as-is because their env var name is the one the
+ * provider's models.yml entry declares, and the store only accepts a
+ * conventional upper-case name at write time — so nothing stored here can
+ * shadow PATH or LD_PRELOAD. Server-side only.
+ */
+export function loadOmpSecretEnv(): Record<string, string> {
+  const store = readStore();
+  const env: Record<string, string> = { ...webSearchEnv(decryptAll(store)) };
+  for (const bucket of Object.entries(store.providers).map(([, value]) => value)) {
+    for (const [name, envelope] of Object.entries(bucket)) {
+      const value = decryptSecretEnvelope(envelope);
+      if (typeof value === "string" && value.length > 0) env[name] = value;
+    }
+  }
+  return env;
+}
+
+// ---------------------------------------------------------------------------
+// Model-provider credentials
+//
+// A provider's secret lives here, encrypted, under the env var its models.yml
+// entry declares. omp-web never writes the literal into models.yml: the file
+// names `envVars: ["X_PROV_API_KEY"]` and the value is injected into the child
+// process, the same way GH_TOKEN and the web-search keys are.
+//
+// Deliberately NOT `apiKey: ENV_NAME` in models.yml. That convention exists,
+// but omp shipped a bug where the env var's NAME was sent as the key, making
+// models fail to load or disappear outright (omp PR #13815). `envVars` is what
+// omp's own catalog uses — `"zai": {"envVars":["ZAI_API_KEY"]}` — so it is the
+// mechanism that is observed to work.
+// ---------------------------------------------------------------------------
+
+export interface ProviderKeyStatus {
+  providerId: string;
+  envVar: string;
+  /** Presence only. A route may return this; it may never return the secret. */
+  hasValue: boolean;
+}
+
+export function listProviderKeys(): { path: string; providers: ProviderKeyStatus[] } {
+  const store = readStore();
+  const providers: ProviderKeyStatus[] = [];
+  for (const [providerId, bucket] of Object.entries(store.providers)) {
+    for (const [envVar, envelope] of Object.entries(bucket)) {
+      providers.push({ providerId, envVar, hasValue: envelope.length > 0 });
+    }
+  }
+  providers.sort((a, b) => a.providerId.localeCompare(b.providerId) || a.envVar.localeCompare(b.envVar));
+  return { path: webSearchKeysPath(), providers };
+}
+
+export function saveProviderKey(providerId: string, envVar: string, value: string): ProviderKeyStatus {
+  const id = providerId.trim();
+  if (!id) throw new Error("providerId is required");
+  if (!isEnvVarName(envVar)) {
+    throw new Error(`Invalid environment variable name: ${envVar}`);
+  }
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error("value is required");
+  const store = readStore();
+  const bucket = { ...(store.providers[id] ?? {}), [envVar]: encryptSecretEnvelope(trimmed) };
+  store.providers[id] = bucket;
+  writeStore(store);
+  return { providerId: id, envVar, hasValue: true };
+}
+
+export function deleteProviderKey(providerId: string, envVar?: string): { path: string } {
+  const store = readStore();
+  const id = providerId.trim();
+  if (envVar) {
+    const bucket = store.providers[id];
+    if (bucket) {
+      delete bucket[envVar];
+      if (Object.keys(bucket).length === 0) delete store.providers[id];
+      writeStore(store);
+    }
+  } else if (store.providers[id]) {
+    delete store.providers[id];
+    writeStore(store);
+  }
+  return { path: webSearchKeysPath() };
 }
