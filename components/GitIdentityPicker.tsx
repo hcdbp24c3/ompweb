@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 
 /**
@@ -32,9 +32,18 @@ export function GitIdentityPicker({
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  // Switching workspaces fast used to leave the previous workspace's answer on
+  // screen: its slower request resolved last and wrote over the newer one. The
+  // abort is what makes "last write wins" mean "the workspace you are IN".
+  const abortRef = useRef<AbortController | null>(null);
+
   const load = useCallback(async () => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const signal = controller.signal;
     try {
-      const response = await fetch("/api/git-identity");
+      const response = await fetch("/api/git-identity", { signal });
       const data = (await response.json()) as {
         identities?: Array<{ id: string; label: string; name?: string; email?: string }>;
         default?: { name: string; email: string } | null;
@@ -46,18 +55,32 @@ export function GitIdentityPicker({
       setIdentities(list);
       // What resolves HERE, not merely what is stored globally: the effective
       // value can still be the default or an older per-repo override.
-      setSelectedId(await effectiveSelection(cwd));
+      const effective = await effectiveSelection(cwd, signal);
+      // Two awaits, so the workspace can have changed in between. Abort covers
+      // the fetch; this covers a resolve that was already in flight.
+      if (signal.aborted) return;
+      setSelectedId(effective);
       setLoaded(true);
     } catch (failure) {
+      if (signal.aborted) return;
       onError?.(failure instanceof Error ? failure.message : String(failure));
       setLoaded(true);
     }
   }, [cwd, onError]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    // A fresh cwd starts blank rather than showing the previous workspace's
+    // identity for the moment before the new answer arrives.
+    setLoaded(false);
+    void load();
+    return () => { abortRef.current?.abort(); };
+  }, [load]);
 
   const choose = async (identityId: string) => {
     const previous = selectedId;
+    // A load still in flight would otherwise land after this and reset the
+    // control to whatever the server answered before the save went through.
+    abortRef.current?.abort();
     setSelectedId(identityId);
     setBusy(true);
     try {
@@ -124,12 +147,12 @@ export function GitIdentityPicker({
  * selection, then a v1 per-repo override, then the default, and a second copy of
  * that order in the client is exactly the thing that drifts.
  */
-async function effectiveSelection(cwd: string | undefined): Promise<string> {
+async function effectiveSelection(cwd: string | undefined, signal: AbortSignal): Promise<string> {
   try {
-    const response = await fetch(`/api/git-identity/resolve?cwd=${encodeURIComponent(cwd ?? "")}`);
+    const response = await fetch(`/api/git-identity/resolve?cwd=${encodeURIComponent(cwd ?? "")}`, { signal });
     if (!response.ok) return "";
     const data = (await response.json()) as { via?: string; identityId?: string | null };
-    return data.via === "selected" ? (data.identityId as string | undefined) ?? "" : "";
+    return data.via === "selected" ? data.identityId ?? "" : "";
   } catch {
     return "";
   }
