@@ -45,21 +45,29 @@ const EMPTY_FORM = { name: "", host: "", account: "", token: "", privateKey: "",
 
 type Identity = { name: string; email: string };
 type IdentityOverride = Identity & { path: string };
+type NamedIdentity = Identity & { id: string; label: string };
 
 type IdentityResponse = {
   path?: string;
   default?: Identity | null;
   overrides?: IdentityOverride[];
+  identities?: NamedIdentity[];
+  selection?: Record<string, string>;
   error?: string;
 };
 
-const EMPTY_IDENTITY_FORM = { project: "", name: "", email: "" };
+// `identityId` empty means "the global default"; non-empty edits that saved
+// identity. There is no project field any more: which repository uses which
+// identity is decided by the picker in the Git toolbar, and a second copy of
+// that mapping here would be a second thing to keep in step.
+const EMPTY_IDENTITY_FORM = { identityId: "", label: "", name: "", email: "" };
 
 export function GitIdentityConfig() {
   const { t } = useI18n();
   const [identityPath, setIdentityPath] = useState<string | null>(null);
   const [globalIdentity, setGlobalIdentity] = useState<Identity | null>(null);
   const [overrides, setOverrides] = useState<IdentityOverride[]>([]);
+  const [identities, setIdentities] = useState<NamedIdentity[]>([]);
   const [form, setForm] = useState(EMPTY_IDENTITY_FORM);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -76,6 +84,7 @@ export function GitIdentityConfig() {
       setIdentityPath(data.path ?? null);
       setGlobalIdentity(data.default ?? null);
       setOverrides(Array.isArray(data.overrides) ? data.overrides : []);
+      setIdentities(Array.isArray(data.identities) ? data.identities : []);
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
     } finally {
@@ -89,12 +98,12 @@ export function GitIdentityConfig() {
     setForm((previous) => ({ ...previous, [key]: value }));
 
   const editGlobal = () => {
-    setForm({ project: "", name: globalIdentity?.name ?? "", email: globalIdentity?.email ?? "" });
+    setForm({ identityId: "", label: "", name: globalIdentity?.name ?? "", email: globalIdentity?.email ?? "" });
     setError(null);
   };
 
   const editOverride = (override: IdentityOverride) => {
-    setForm({ project: override.path, name: override.name, email: override.email });
+    setForm({ identityId: "", label: "", name: override.name, email: override.email });
     setError(null);
   };
 
@@ -112,11 +121,19 @@ export function GitIdentityConfig() {
     setSaving(true);
     setError(null);
     try {
-      const project = form.project.trim();
-      await put({ ...(project ? { project } : {}), name: form.name, email: form.email });
+      const identityId = form.identityId.trim();
+      if (identityId) {
+        await put({ action: "named", id: identityId, label: form.label, name: form.name, email: form.email });
+      } else if (form.label.trim()) {
+        // A label is what the picker shows, so supplying one without an existing
+        // id means CREATE a named identity rather than overwrite the default.
+        await put({ action: "named", label: form.label, name: form.name, email: form.email });
+      } else {
+        await put({ name: form.name, email: form.email });
+      }
       await load();
       setForm(EMPTY_IDENTITY_FORM);
-      toast.success(t("gitIdentity.saved"), project || t("gitIdentity.scopeGlobal"));
+      toast.success(t("gitIdentity.saved"), form.label.trim() || t("gitIdentity.scopeGlobal"));
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
     } finally {
@@ -128,7 +145,7 @@ export function GitIdentityConfig() {
     setSaving(true);
     try {
       await put({ project: path, clear: true });
-      if (form.project === path) setForm(EMPTY_IDENTITY_FORM);
+      setForm(EMPTY_IDENTITY_FORM);
       await load();
       toast.success(t("gitIdentity.cleared"));
     } catch (failure) {
@@ -139,11 +156,28 @@ export function GitIdentityConfig() {
     }
   };
 
+  /** Removing an identity also clears every workspace that pointed at it, so no
+   *  repository is left naming an identity that no longer exists. */
+  const removeNamed = async (id: string) => {
+    setSaving(true);
+    setError(null);
+    try {
+      await put({ action: "named", id, clear: true });
+      if (form.identityId === id) setForm(EMPTY_IDENTITY_FORM);
+      await load();
+      toast.success(t("gitIdentity.removed"));
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const clearGlobal = async () => {
     setSaving(true);
     try {
       await put({ clear: true });
-      if (!form.project) setForm(EMPTY_IDENTITY_FORM);
+      setForm(EMPTY_IDENTITY_FORM);
       await load();
       toast.success(t("gitIdentity.cleared"));
     } catch (failure) {
@@ -214,9 +248,38 @@ export function GitIdentityConfig() {
         </div>
         )}
 
+        {/* The named identities the Git toolbar's picker offers. Kept here rather
+            than only in the picker because a workspace choice is per workspace:
+            an identity you can select but never rename or remove is a trap. */}
+        {identities.length > 0 && (
+          <div style={{ display: "grid", gap: 5 }}>
+            {identities.map((identity) => (
+              <div key={identity.id} style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 11 }}>
+                <span style={{ minWidth: 0, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{identity.label || identity.name}</span>
+                <code style={{ minWidth: 0, flex: 1, color: "var(--text)", fontSize: 10, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{identity.name} &lt;{identity.email}&gt;</code>
+                <button type="button" onClick={() => setForm({ identityId: identity.id, label: identity.label, name: identity.name, email: identity.email })} style={{ border: "none", background: "transparent", color: "var(--accent)", cursor: "pointer", fontSize: 10 }}>{t("gitIdentity.edit")}</button>
+                <button
+                  type="button"
+                  title={t("gitIdentity.remove")}
+                  aria-label={t("gitIdentity.remove")}
+                  onClick={() => void removeNamed(identity.id)}
+                  disabled={saving}
+                  style={{ display: "inline-flex", padding: 0, border: "none", background: "transparent", color: "var(--text-muted)", cursor: saving ? "wait" : "pointer" }}
+                >
+                  <Trash2 size={13} aria-hidden="true" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         <div style={{ display: "grid", gap: 9, padding: 10, border: "1px solid var(--border)", borderRadius: "var(--radius-control)" }}>
-          <Field label={t("gitIdentity.project")} hint={t("gitIdentity.projectHint")}>
-            <TextInput value={form.project} onChange={(value) => set("project", value)} placeholder="/path/to/repo" mono spellCheck={false} />
+          {/* NO project field, deliberately. Which repository commits as whom is
+              decided by the picker in the Git toolbar and remembered per
+              workspace; a second copy of that mapping here would be a second
+              thing that can drift from the server's resolution order. */}
+          <Field label={t("gitIdentity.namedLabel")} hint={t("gitIdentity.namedHint")}>
+            <TextInput value={form.label} onChange={(value) => set("label", value)} placeholder={t("gitIdentity.namedPlaceholder")} spellCheck={false} />
           </Field>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 9 }}>
             <Field label={t("gitIdentity.name")}>
