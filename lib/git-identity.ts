@@ -80,14 +80,38 @@ export interface GitIdentityOverride extends GitIdentity {
   path: string;
 }
 
+/** A saved identity the user can pick by name. */
+export interface NamedGitIdentity extends GitIdentity {
+  /** Stable id, chosen once and never reused for another identity. */
+  id: string;
+  /** The user's own label for it ("work", "personal"). Defaults to the name. */
+  label: string;
+}
+
 export interface GitIdentityStore {
   version: typeof STORE_VERSION;
   default?: GitIdentity;
   overrides: GitIdentityOverride[];
+  /**
+   * The named identities the combo box offers. Absent in a v1 file and empty in
+   * one that has only ever had a default — resolution falls back to `default`
+   * exactly as before, so an existing install keeps committing correctly with no
+   * migration step and no re-entry.
+   */
+  identities: NamedGitIdentity[];
+  /**
+   * Canonical project root -> the identity id chosen for THAT workspace.
+   *
+   * This is the "remember per workspace" rule: opening repo B brings back what
+   * you last picked for repo B, not whatever you last picked somewhere else.
+   * Keyed the same way overrides are, so a worktree resolves to its main checkout
+   * and cannot grow a second, separate row.
+   */
+  selection: Record<string, string>;
 }
 
 /** Where an answer came from, so a caller can explain it rather than guess. */
-export type GitIdentityMatch = "project" | "default";
+export type GitIdentityMatch = "selected" | "project" | "default";
 
 export interface ResolvedGitIdentity {
   identity: GitIdentity;
@@ -101,6 +125,9 @@ export interface GitIdentityView {
   path: string;
   default: GitIdentity | null;
   overrides: GitIdentityOverride[];
+  identities: NamedGitIdentity[];
+  /** Canonical project root -> identity id, for the workspace switcher. */
+  selection: Record<string, string>;
 }
 
 /** Error carrying a stable code for client localization. */
@@ -213,12 +240,15 @@ function readIdentity(value: unknown): GitIdentity | undefined {
  *  empty store rather than throwing, exactly like parseProjectRegistry and
  *  parseGitCredentialStore. */
 export function parseGitIdentityStore(raw: string): GitIdentityStore {
-  const empty: GitIdentityStore = { version: STORE_VERSION, overrides: [] };
+  const empty: GitIdentityStore = { version: STORE_VERSION, overrides: [], identities: [], selection: {} };
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (!isRecord(parsed) || !Array.isArray(parsed.overrides)) return empty;
+    // `overrides` must be an array to be READ, but a file missing it still has a
+    // usable default: refusing the whole file over one absent key would silently
+    // drop a working identity and leave commits unattributed.
+    if (!isRecord(parsed)) return empty;
     const overrides: GitIdentityOverride[] = [];
-    for (const item of parsed.overrides) {
+    for (const item of Array.isArray(parsed.overrides) ? parsed.overrides : []) {
       if (!isRecord(item)) continue;
       const path = typeof item.path === "string" ? item.path.trim() : "";
       const identity = readIdentity(item);
@@ -232,10 +262,32 @@ export function parseGitIdentityStore(raw: string): GitIdentityStore {
       else overrides[existing] = record;
     }
     const fallback = readIdentity(parsed.default);
+    // v1 files have neither field. Both are read defensively rather than assumed
+    // present, because the file is hand-editable and a half-written one must not
+    // throw on the way to a working fallback.
+    const identities: NamedGitIdentity[] = [];
+    if (Array.isArray(parsed.identities)) {
+      for (const item of parsed.identities) {
+        if (!isRecord(item)) continue;
+        const identity = readIdentity(item);
+        const id = typeof item.id === "string" ? item.id.trim() : "";
+        if (!identity || !id) continue;
+        const label = typeof item.label === "string" && item.label.trim() ? item.label.trim() : identity.name;
+        identities.push({ id, label, ...identity });
+      }
+    }
+    const selection: Record<string, string> = {};
+    if (isRecord(parsed.selection)) {
+      for (const [path, id] of Object.entries(parsed.selection)) {
+        if (path.trim() && typeof id === "string" && id.trim()) selection[comparableProjectPath(path)] = id.trim();
+      }
+    }
     return {
       version: STORE_VERSION,
       ...(fallback ? { default: fallback } : {}),
       overrides,
+      identities,
+      selection,
     };
   } catch {
     return empty;
@@ -246,7 +298,7 @@ export function loadGitIdentityStore(): GitIdentityStore {
   try {
     return parseGitIdentityStore(readFileSync(gitIdentityPath(), "utf8"));
   } catch {
-    return { version: STORE_VERSION, overrides: [] };
+    return { version: STORE_VERSION, overrides: [], identities: [], selection: {} };
   }
 }
 
@@ -261,6 +313,8 @@ export function listGitIdentities(): GitIdentityView {
   return {
     path: gitIdentityPath(),
     default: store.default ? { name: store.default.name, email: store.default.email } : null,
+    identities: store.identities ?? [],
+    selection: store.selection ?? {},
     overrides: store.overrides.map((override) => ({ path: override.path, name: override.name, email: override.email })),
   };
 }
@@ -301,12 +355,14 @@ async function canonicalOverridePath(value: unknown): Promise<string> {
 export function saveDefaultGitIdentity(input: unknown): GitIdentityStore {
   const identity = validateGitIdentityInput(input);
   const store = loadGitIdentityStore();
-  return writeStore({ version: STORE_VERSION, default: identity, overrides: store.overrides });
+  // identities/selection ride along: saving a default must not drop the named
+  // identities or the per-workspace choices the combo box is built from.
+  return writeStore({ ...store, default: identity });
 }
 
 export function clearDefaultGitIdentity(): GitIdentityStore {
   const store = loadGitIdentityStore();
-  return writeStore({ version: STORE_VERSION, overrides: store.overrides });
+  return writeStore({ ...store, default: undefined });
 }
 
 export async function saveProjectGitIdentity(path: unknown, input: unknown): Promise<GitIdentityStore> {
@@ -316,7 +372,7 @@ export async function saveProjectGitIdentity(path: unknown, input: unknown): Pro
   const key = comparableProjectPath(projectRoot);
   const overrides = store.overrides.filter((override) => comparableProjectPath(override.path) !== key);
   overrides.push({ path: projectRoot, ...identity });
-  return writeStore({ version: STORE_VERSION, ...(store.default ? { default: store.default } : {}), overrides });
+  return writeStore({ ...store, overrides });
 }
 
 /** Idempotent: clearing an override that was never there succeeds and writes an
@@ -327,7 +383,7 @@ export async function clearProjectGitIdentity(path: unknown): Promise<GitIdentit
   const key = comparableProjectPath(projectRoot);
   const overrides = store.overrides.filter((override) => comparableProjectPath(override.path) !== key);
   if (overrides.length === store.overrides.length) return store;
-  return writeStore({ version: STORE_VERSION, ...(store.default ? { default: store.default } : {}), overrides });
+  return writeStore({ ...store, overrides });
 }
 
 // ---------------------------------------------------------------------------
@@ -339,10 +395,70 @@ export async function clearProjectGitIdentity(path: unknown): Promise<GitIdentit
 export function selectGitIdentity(input: { store: GitIdentityStore; projectRoot: string }): ResolvedGitIdentity | null {
   const { store, projectRoot } = input;
   const key = comparableProjectPath(projectRoot);
+
+  // The combo box wins: the user picked this for THIS workspace.
+  const chosenId = store.selection?.[key];
+  if (chosenId) {
+    const chosen = store.identities?.find((entry) => entry.id === chosenId);
+    if (chosen) return { identity: { name: chosen.name, email: chosen.email }, via: "selected", projectRoot };
+  }
+  // A v1 override still answers for a repository that has one.
   const override = store.overrides.find((entry) => comparableProjectPath(entry.path) === key);
   if (override) return { identity: { name: override.name, email: override.email }, via: "project", projectRoot };
   if (store.default) return { identity: { name: store.default.name, email: store.default.email }, via: "default", projectRoot };
   return null;
+}
+
+/**
+ * Remember an identity for one workspace. `null` clears the choice, which sends
+ * that workspace back to the default rather than to whoever was picked last.
+ */
+export function selectGitIdentityForWorkspace(
+  store: GitIdentityStore,
+  projectRoot: string,
+  identityId: string | null,
+): GitIdentityStore {
+  const selection = { ...(store.selection ?? {}) };
+  const key = comparableProjectPath(projectRoot);
+  if (identityId === null) delete selection[key];
+  else {
+    if (!(store.identities ?? []).some((entry) => entry.id === identityId)) {
+      throw new GitIdentityError("unknown_identity", `No such git identity: ${identityId}`);
+    }
+    selection[key] = identityId;
+  }
+  return { ...store, selection };
+}
+
+/** Save a new named identity, or replace an existing one by id. */
+export function saveGitIdentity(input: { store: GitIdentityStore; id?: string; label?: unknown; name: unknown; email: unknown }): GitIdentityStore {
+  const identity = validateGitIdentityInput({ name: input.name, email: input.email });
+  const label = typeof input.label === "string" && input.label.trim() ? input.label.trim().slice(0, 120) : identity.name;
+  const identities = [...(store_identities(input.store))];
+  const id = input.id?.trim();
+  if (id) {
+    const at = identities.findIndex((entry) => entry.id === id);
+    if (at === -1) throw new GitIdentityError("unknown_identity", `No such git identity: ${id}`);
+    identities[at] = { id, label, ...identity };
+  } else {
+    identities.push({ id: `gitid-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`, label, ...identity });
+  }
+  return { ...input.store, identities };
+}
+
+function store_identities(store: GitIdentityStore): NamedGitIdentity[] {
+  return store.identities ?? [];
+}
+
+export function deleteGitIdentity(store: GitIdentityStore, id: string): GitIdentityStore {
+  const identities = store_identities(store).filter((entry) => entry.id !== id);
+  const selection: Record<string, string> = {};
+  // Drop every workspace that pointed at it, or they would resolve to nothing
+  // and silently fall through to a DIFFERENT identity than the user chose.
+  for (const [path, value] of Object.entries(store.selection ?? {})) {
+    if (value !== id) selection[path] = value;
+  }
+  return { ...store, identities, selection };
 }
 
 /** The identity for a cwd, or `null` — an explicit state, never a guess. */
