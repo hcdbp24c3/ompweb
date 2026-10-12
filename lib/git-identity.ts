@@ -557,6 +557,45 @@ export async function gitIdentityEnvForSpawn(cwd: string): Promise<GitIdentityEn
  * record, not a filesystem probe: GET takes no request at all, so a browser
  * cannot ask "which identity does <arbitrary directory> use" and be told.
  */
+/**
+ * Save a named identity, or update/remove one by id.
+ *
+ * Returns null for "nothing to do" so the caller can tell an explicit no-op from
+ * a write: the combo box posts an empty body when the user cancels, and that
+ * must not rewrite the file.
+ */
+export function applyNamedGitIdentityUpdate(input: unknown): GitIdentityStore | null {
+  if (!isRecord(input)) throw new GitIdentityError("identity_invalid", "Identity must be an object");
+  if (input.clear !== undefined && typeof input.clear !== "boolean") {
+    throw new GitIdentityError("clear_invalid", "Clear must be a boolean");
+  }
+  const store = loadGitIdentityStore();
+  const id = typeof input.id === "string" ? input.id.trim() : "";
+  if (input.clear === true) {
+    if (!id) return null;
+    return writeStore(deleteGitIdentity(store, id));
+  }
+  if (input.name === undefined && input.email === undefined) return null;
+  return writeStore(saveGitIdentity({ store, id: id || undefined, label: input.label, name: input.name, email: input.email }));
+}
+
+/**
+ * Remember which identity a workspace uses.
+ *
+ * The project root is resolved server-side from the browser's cwd, never taken
+ * from the request body: a client that named its own path could point one
+ * repository's identity at another's.
+ */
+export async function applyGitIdentitySelection(input: unknown): Promise<GitIdentityStore> {
+  if (!isRecord(input)) throw new GitIdentityError("identity_invalid", "Identity must be an object");
+  const projectRoot = await resolveProject(typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd()).then((r) => r.projectRoot);
+  const identityId = input.identityId;
+  if (identityId !== null && typeof identityId !== "string") {
+    throw new GitIdentityError("identity_invalid", "identityId must be a string or null");
+  }
+  return writeStore(selectGitIdentityForWorkspace(loadGitIdentityStore(), projectRoot, identityId ?? null));
+}
+
 export async function applyGitIdentityUpdate(input: unknown): Promise<GitIdentityStore> {
   if (!isRecord(input)) throw new GitIdentityError("identity_invalid", "Identity must be an object");
   if (input.clear !== undefined && typeof input.clear !== "boolean") {
