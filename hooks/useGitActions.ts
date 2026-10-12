@@ -101,6 +101,13 @@ export interface UseGitActionsOptions {
 }
 
 export interface UseGitActions {
+  /**
+   * The workspace these actions operate on, surfaced so the toolbar can ask.
+   * The identity picker is per workspace, so it cannot be answered by a module
+   * level value.
+   */
+  cwd: string | null;
+
   commitMessage: string;
   setCommitMessage: (message: string) => void;
   /** The ticked absolute paths, exactly as the panel reported them. */
@@ -292,6 +299,10 @@ export function useGitActions({ cwd, onChanged }: UseGitActionsOptions): UseGitA
   }, [canCancel]);
 
   return useMemo(() => ({
+    // Surfaced so the toolbar can ask what workspace it is operating on — the
+    // identity picker is per workspace, so it cannot be answered by a module
+    // level value.
+    cwd: cwd ?? null,
     commitMessage,
     setCommitMessage,
     tickedPaths,
@@ -304,5 +315,5 @@ export function useGitActions({ cwd, onChanged }: UseGitActionsOptions): UseGitA
     pull,
     cancel,
     operation,
-  }), [busy, canCancel, canCommit, cancel, commitMessage, operation, pull, push, runCommit, tickedPaths]);
+  }), [busy, canCancel, canCommit, cancel, commitMessage, cwd, operation, pull, push, runCommit, tickedPaths]);
 }

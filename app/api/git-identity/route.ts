@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
-import { GitIdentityError, applyGitIdentityUpdate, invalidateGitIdentityCache, listGitIdentities } from "@/lib/git-identity";
+import {
+  GitIdentityError,
+  applyGitIdentitySelection,
+  applyGitIdentityUpdate,
+  applyNamedGitIdentityUpdate,
+  invalidateGitIdentityCache,
+  listGitIdentities,
+} from "@/lib/git-identity";
 
 // Auth is proxy.ts's job: every /api/ route sits behind the same web-password
 // gate, so there is no per-route authorization to extend here.
@@ -35,7 +42,14 @@ export async function GET() {
 export async function PUT(request: Request) {
   try {
     const body = await parseJsonWithinLimit<Record<string, unknown>>(request, MAX_REQUEST_BYTES);
-    await applyGitIdentityUpdate(body);
+    // `action` keeps the existing payloads untouched: the Settings panel still
+    // posts `{ name, email }` / `{ project }`, and the Git tab's combo box posts
+    // the two new shapes. Overloading `project` for a workspace choice would
+    // have made the old and new meanings indistinguishable.
+    const action = body.action;
+    if (action === "select") await applyGitIdentitySelection(body);
+    else if (action === "named") applyNamedGitIdentityUpdate(body);
+    else await applyGitIdentityUpdate(body);
     // An identity edited in Settings has to reach the next child at once, not
     // after the per-cwd cache window.
     invalidateGitIdentityCache();

@@ -1,5 +1,6 @@
 "use client";
 
+import { GitIdentityPicker } from "./GitIdentityPicker";
 import { memo, useEffect, useState, type ReactNode, type RefObject } from "react";
 import {
   AtSign,
@@ -514,6 +515,11 @@ function GitActionButtons({ isMobile }: { isMobile: boolean }) {
       {action(t("gitChanges.commit"), "git-commit", git.commit, <GitCommitHorizontal size={13} strokeWidth={2} aria-hidden="true" />, git.canCommit)}
       {action(t("gitChanges.push"), "git-push", git.push, <Upload size={13} strokeWidth={2} aria-hidden="true" />, !git.busy)}
       {action(t("gitChanges.pull"), "git-pull", git.pull, <Download size={13} strokeWidth={2} aria-hidden="true" />, !git.busy)}
+      {/* Identity, not a toggle: it decides who the NEXT commit is attributed to,
+          so it sits with commit rather than in a settings panel. Hidden until a
+          second identity exists, because with only a global default there is
+          nothing to choose. */}
+      <GitIdentityPicker cwd={git.cwd ?? undefined} />
     </>
   );
 }
