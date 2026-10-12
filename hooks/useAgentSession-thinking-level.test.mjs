@@ -326,3 +326,70 @@ test("a persisted selection rehydrates as the selector it was, never blanket-Aut
   const explicit = await mount("s2");
   assert.equal(explicit.latest.thinkingLevel, "high", "a persisted explicit level must not become Auto");
 });
+// ---------------------------------------------------------------------------
+// The Auto regression
+//
+// A selector and the level omp RESOLVES it to are the same string when the
+// selector is concrete, which is why writing the resolved value back was
+// invisible. For "auto" they are not: omp answers Auto with a concrete effort,
+// so the resolved value replaced the user's choice. Only Auto appeared to jump.
+// ---------------------------------------------------------------------------
+
+test("a resolved effort does not overwrite an Auto the user just picked", async () => {
+  world.live = { running: true, state: {} };
+  const w = await mount("s-auto");
+  await act(async () => { w.latest.handleThinkingLevelChange?.("auto"); });
+  await settle();
+  assert.equal(w.latest.thinkingLevel, "auto");
+
+  // What get_state answers for "auto": a concrete level, not the selector.
+  world.context.thinkingLevel = "low";
+  lastEs().emit({ type: "thinking_level_changed", thinkingLevel: "low" });
+  await settle();
+  assert.equal(w.latest.thinkingLevel, "auto",
+    "the answer to Auto is not a new decision the user made");
+  w.unmount();
+});
+
+test("omp changing a CONCRETE level is still noticed", async () => {
+  // The other half of the rule, and the reason this is not a blanket ignore:
+  // if the user picked `medium` and omp really moves it, the composer must
+  // follow, or the picker would lie about the run's budget.
+  world.live = { running: true, state: {} };
+  const w = await mount("s-concrete");
+  await act(async () => { w.latest.handleThinkingLevelChange?.("medium"); });
+  await settle();
+  assert.equal(w.latest.thinkingLevel, "medium");
+
+  lastEs().emit({ type: "thinking_level_changed", thinkingLevel: "high" });
+  await settle();
+  assert.equal(w.latest.thinkingLevel, "high");
+  w.unmount();
+});
+
+test("configured on the frame is the selector, and it wins", async () => {
+  world.live = { running: true, state: {} };
+  const w = await mount("s-cfg");
+  lastEs().emit({ type: "thinking_level_changed", configured: "auto", thinkingLevel: "high" });
+  await settle();
+  assert.equal(w.latest.thinkingLevel, "auto");
+
+  // And the next bare answer still must not undo it.
+  lastEs().emit({ type: "thinking_level_changed", thinkingLevel: "high" });
+  await settle();
+  assert.equal(w.latest.thinkingLevel, "auto");
+  w.unmount();
+});
+
+test("a session rehydrated as Auto stays Auto across a state refresh", async () => {
+  // The reload case: the file said Auto, then get_state answers a concrete
+  // effort for it.
+  world.live = { running: true, state: {} };
+  world.context = { messages: [], entryIds: [], thinkingLevel: "auto", model: null, todoPhases: [] };
+  const w = await mount("s-reload");
+  assert.equal(w.latest.thinkingLevel, "auto");
+  lastEs().emit({ type: "thinking_level_changed", thinkingLevel: "medium" });
+  await settle();
+  assert.equal(w.latest.thinkingLevel, "auto");
+  w.unmount();
+});

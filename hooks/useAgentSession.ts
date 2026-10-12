@@ -241,6 +241,30 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [toolPreset, setToolPreset] = useState<ToolPreset>("full");
   useEffect(() => { setToolPreset(getPreferredToolPreset()); }, []);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
+  /**
+   * The SELECTOR, when one is known, as opposed to a level omp has merely
+   * resolved it to.
+   *
+   * `get_state`, `config_update` and a bare `thinking_level_changed` all report
+   * the RESOLVED effort. When the selector was a concrete level the two are the
+   * same string, so writing the resolved value back was invisible. When the
+   * selector was "auto" they are NOT: omp answers "auto" with a concrete effort,
+   * and writing that back silently replaced the user's choice with a level they
+   * never picked. That is why only Auto jumped and no other level did.
+   *
+   * So: a bare resolved level is ignored while the selector is Auto (it is the
+   * answer to Auto, not a new decision), and applied otherwise, which keeps the
+   * existing ability to notice omp changing the level on its own.
+   */
+  const thinkingSelectorRef = useRef<ThinkingLevelOption | null>(null);
+
+  /** Apply a level omp reported without saying which selector produced it. */
+  const applyResolvedThinkingLevel = useCallback((value: string | undefined) => {
+    if (value === undefined) return;
+    const resolved = normalizeThinkingLevel(value);
+    if (thinkingSelectorRef.current === "auto" && resolved !== "auto") return;
+    setThinkingLevel(resolved);
+  }, []);
   const [fastModeEnabled, setFastModeEnabled] = useState(false);
   const [fastModeActive, setFastModeActive] = useState<boolean | undefined>(undefined);
   // Runtime session modes returned by get_state and changed via RPC
@@ -758,7 +782,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // modelCommandPendingRef: a model switch legitimately re-resolves the
       // level, and its resolved level has to reach the composer.
       if (agentState.state?.thinkingLevel !== undefined && !options?.thinkingLevelInFlight) {
-        setThinkingLevel(normalizeThinkingLevel(agentState.state.thinkingLevel));
+        applyResolvedThinkingLevel(agentState.state.thinkingLevel);
       }
       // Fast mode is family-scoped in omp: switching to a fast-supported
       // model flips the child's state without any event, so the composer
@@ -883,7 +907,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (liveState) {
           if (liveState.contextUsage !== undefined) setContextUsage(liveState.contextUsage ?? null);
           if (liveState.systemPrompt !== undefined) setSystemPrompt(liveState.systemPrompt || null);
-          if (modelApplied && liveState.thinkingLevel !== undefined) setThinkingLevel(normalizeThinkingLevel(liveState.thinkingLevel));
+          if (modelApplied && liveState.thinkingLevel !== undefined) applyResolvedThinkingLevel(liveState.thinkingLevel);
           if (liveState.fastModeEnabled !== undefined) setFastModeEnabled(liveState.fastModeEnabled);
           setFastModeActive(liveState.fastModeActive);
           if (liveState.autoRetryEnabled !== undefined) setAutoRetryEnabled(liveState.autoRetryEnabled);
@@ -2028,7 +2052,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // A frame carrying neither field carries no answer at all, and
         // normalizeThinkingLevel reads a missing value as Auto — which would
         // turn "no information" into "the user picked Auto".
-        if (level !== undefined) setThinkingLevel(normalizeThinkingLevel(level));
+        if (level !== undefined) {
+          // `configured` is the selector; a bare `thinkingLevel` is the answer.
+          if ((event as { configured?: string }).configured !== undefined) {
+            thinkingSelectorRef.current = normalizeThinkingLevel(level);
+            setThinkingLevel(thinkingSelectorRef.current);
+          } else {
+            applyResolvedThinkingLevel(level);
+          }
+        }
         break;
       }
       case "model_changed": {
@@ -2044,7 +2076,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             if (sessionIdRef.current !== sid) return;
             const applied = applyAuthoritativeModel(toThinkingModelMeta(d.state.model), token);
             if (!applied) return; // stale snapshot — drop its thinking level too
-            if (d.state.thinkingLevel !== undefined) setThinkingLevel(normalizeThinkingLevel(d.state.thinkingLevel));
+            if (d.state.thinkingLevel !== undefined) applyResolvedThinkingLevel(d.state.thinkingLevel);
             if (d.state.fastModeEnabled !== undefined) setFastModeEnabled(d.state.fastModeEnabled);
             setFastModeActive(d.state.fastModeActive);
             if (d.state.autoRetryEnabled !== undefined) setAutoRetryEnabled(d.state.autoRetryEnabled);
@@ -2062,7 +2094,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const model = event.model as { provider?: string; id?: string; name?: string; reasoning?: boolean; thinking?: { efforts?: string[] } } | undefined;
         if (model) applyAuthoritativeModel(toThinkingModelMeta(model));
         else if (event.thinkingLevel !== undefined) authoritativeModelSeqRef.current += 1;
-        if (event.thinkingLevel !== undefined) setThinkingLevel(normalizeThinkingLevel(event.thinkingLevel as string | undefined));
+        if (event.thinkingLevel !== undefined) applyResolvedThinkingLevel(event.thinkingLevel as string | undefined);
         break;
       }
       case "available_commands_update": {
@@ -2399,7 +2431,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // disappears; a newer/pending RPC choice must never be rolled back.
       setLiveModelMeta(null);
       setCurrentModelOverride(null);
-      setThinkingLevel(normalizeThinkingLevel(context.thinkingLevel));
+      // From the session file this is a selector too — it is what
+      // `configured` recorded, and for a session never switched it is now omp's
+      // configured default rather than a hardcoded "off".
+      thinkingSelectorRef.current = normalizeThinkingLevel(context.thinkingLevel);
+      setThinkingLevel(thinkingSelectorRef.current);
     },
     subscribe: (force) => {
       const sid = sessionIdRef.current;
@@ -3225,6 +3261,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     authoritativeModelSeqRef.current += 1;
+    // An explicit choice, including "auto", is a selector. Recording it is what
+    // stops the next get_state from answering "auto" with a concrete effort and
+    // writing that back over the pick.
+    thinkingSelectorRef.current = level;
     setThinkingLevel(level);
     // "auto" is a real choice, not the absence of one: omp's ThinkingLevel
     // carries Inherit ("inherit") as its first member, and set_thinking_level
